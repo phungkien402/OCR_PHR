@@ -1,4 +1,8 @@
-"""OCR engine supporting VietOCR (handwritten) and EasyOCR (LCD displays)."""
+"""OCR engine supporting Tesseract (LCD displays) and VietOCR (handwritten text).
+
+Image type detection is consolidated here — this is the single source of truth
+for deciding which OCR engine to use.
+"""
 
 import logging
 
@@ -10,7 +14,71 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 
 _vietocr_predictor = None
-_easyocr_reader = None
+
+
+def detect_image_mode(image: np.ndarray) -> str:
+    """Detect whether image is LCD display or handwritten text.
+
+    This is the SINGLE place for image type classification.
+    Uses contrast ratio, histogram bimodality, and region analysis.
+
+    Args:
+        image: Grayscale or BGR image as numpy array.
+
+    Returns:
+        "lcd" or "handwritten"
+    """
+    if len(image.shape) == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = image
+
+    # Calculate contrast ratio
+    p5 = np.percentile(gray, 5)
+    p95 = np.percentile(gray, 95)
+    contrast_ratio = (p95 - p5) / 255.0
+
+    # Check for dark background (LCD screens are typically dark)
+    mean_val = np.mean(gray)
+    dark_background = mean_val < 128
+
+    # Calculate histogram bimodality (LCD displays tend to be bimodal)
+    hist = cv2.calcHist([gray], [0], None, [256], [0, 256]).flatten()
+    hist = hist / hist.sum()
+
+    # Find peaks in histogram
+    peaks = []
+    for i in range(5, 251):
+        if hist[i] > hist[i - 1] and hist[i] > hist[i + 1] and hist[i] > 0.01:
+            peaks.append((i, hist[i]))
+
+    # Analyze contours for large isolated digit-like regions
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    large_regions = 0
+    if contours:
+        img_area = gray.shape[0] * gray.shape[1]
+        large_regions = sum(1 for c in contours if cv2.contourArea(c) > img_area * 0.003)
+
+    # LCD detection heuristics:
+    # 1. Dark background with some bright content (high contrast)
+    # 2. OR product photo characteristics (medium contrast, few large regions)
+    is_lcd = False
+
+    # Strong signal: dark background + high contrast
+    if dark_background and contrast_ratio > 0.3:
+        is_lcd = True
+    # Medium signal: high contrast + isolated large regions
+    elif contrast_ratio > 0.4 and large_regions >= 2 and large_regions <= 40:
+        is_lcd = True
+
+    mode = "lcd" if is_lcd else "handwritten"
+    logger.info(
+        "Image type detection: %s (contrast=%.2f, large_regions=%d, peaks=%d, mean=%.0f)",
+        mode, contrast_ratio, large_regions, len(peaks), mean_val,
+    )
+    return mode
 
 
 def load_vietocr(device: str = "cuda:0"):
@@ -53,99 +121,6 @@ def load_vietocr(device: str = "cuda:0"):
     return _vietocr_predictor
 
 
-def load_easyocr(device: str = "cuda:0"):
-    """Load EasyOCR reader for English LCD digit recognition.
-
-    Args:
-        device: Target device.
-
-    Returns:
-        EasyOCR Reader instance.
-    """
-    global _easyocr_reader
-
-    if _easyocr_reader is not None:
-        return _easyocr_reader
-
-    import easyocr
-
-    use_gpu = "cuda" in device
-    logger.info("Loading EasyOCR reader (gpu=%s)", use_gpu)
-
-    try:
-        _easyocr_reader = easyocr.Reader(["en"], gpu=use_gpu)
-        logger.info("EasyOCR reader loaded successfully (gpu=%s)", use_gpu)
-    except (RuntimeError, torch.cuda.OutOfMemoryError) as e:
-        if use_gpu:
-            logger.warning(
-                "Failed to load EasyOCR on GPU (%s). Falling back to CPU.", e
-            )
-            _easyocr_reader = easyocr.Reader(["en"], gpu=False)
-            logger.info("EasyOCR reader loaded successfully on CPU (fallback)")
-        else:
-            raise
-
-    return _easyocr_reader
-
-
-def detect_image_mode(image: np.ndarray) -> str:
-    """Auto-detect whether image is LCD display or handwritten text.
-
-    Uses contrast ratio, edge characteristics, and region analysis
-    to distinguish between digital displays and handwritten text.
-
-    Args:
-        image: Grayscale image as numpy array.
-
-    Returns:
-        "lcd" or "handwritten"
-    """
-    if len(image.shape) == 3:
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    else:
-        gray = image
-
-    # Calculate contrast ratio
-    p5 = np.percentile(gray, 5)
-    p95 = np.percentile(gray, 95)
-    contrast_ratio = (p95 - p5) / 255.0
-
-    # Calculate histogram bimodality (LCD displays tend to be bimodal)
-    hist = cv2.calcHist([gray], [0], None, [256], [0, 256]).flatten()
-    hist = hist / hist.sum()
-
-    # Find peaks in histogram
-    peaks = []
-    for i in range(5, 251):
-        if hist[i] > hist[i-1] and hist[i] > hist[i+1] and hist[i] > 0.01:
-            peaks.append((i, hist[i]))
-
-    # LCD displays: high contrast, bimodal histogram, fewer text regions
-    # with large isolated digit-like contours
-    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    if contours:
-        areas = [cv2.contourArea(c) for c in contours]
-        img_area = gray.shape[0] * gray.shape[1]
-        large_regions = [a for a in areas if a > img_area * 0.005]
-
-        # LCD: few large isolated digit regions, high contrast
-        if (contrast_ratio > 0.5 and len(large_regions) >= 2
-                and len(large_regions) <= 30 and len(peaks) <= 4):
-            logger.debug(
-                "Detected LCD: contrast=%.2f, large_regions=%d, peaks=%d",
-                contrast_ratio, len(large_regions), len(peaks)
-            )
-            return "lcd"
-
-    logger.debug(
-        "Detected handwritten: contrast=%.2f, peaks=%d",
-        contrast_ratio, len(peaks)
-    )
-    return "handwritten"
-
-
 def extract_text(image: np.ndarray, device: str = "cuda:0", mode: str = "auto") -> str:
     """Extract text from a preprocessed image.
 
@@ -159,108 +134,113 @@ def extract_text(image: np.ndarray, device: str = "cuda:0", mode: str = "auto") 
     """
     if mode == "auto":
         mode = detect_image_mode(image)
-        logger.info("Auto-detected OCR mode: %s", mode)
 
     if mode == "lcd":
-        return _extract_text_easyocr(image, device)
+        return _extract_text_tesseract(image)
     else:
         return _extract_text_vietocr(image, device)
 
 
-def _extract_text_easyocr(image: np.ndarray, device: str) -> str:
-    """Extract text using EasyOCR (optimized for LCD/7-segment displays).
+def _extract_text_tesseract(image: np.ndarray) -> str:
+    """Extract text using Tesseract (optimized for LCD/7-segment displays).
 
-    Uses spatial proximity to associate labels with their digit values,
-    producing structured output like "SYS 128" even when they're on separate lines.
+    Runs multiple passes with different preprocessing to capture both
+    labels (SYS, DIA, PUL) and 7-segment digits. Selects the best result.
 
     Args:
-        image: Image as numpy array.
-        device: Target device.
+        image: Image as numpy array (grayscale or BGR).
 
     Returns:
-        Extracted text string with labels and values associated.
+        Extracted text string.
     """
-    reader = load_easyocr(device)
+    import pytesseract
 
-    # EasyOCR expects BGR or grayscale numpy array
-    if len(image.shape) == 2:
-        img_input = image
+    # Set tesseract path explicitly
+    pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
+
+    # Convert to grayscale if needed
+    if len(image.shape) == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     else:
-        img_input = image
+        gray = image
 
-    # Use lower thresholds to catch faint LCD digits
-    results = reader.readtext(img_input, detail=1, paragraph=False,
-                              text_threshold=0.3, low_text=0.3)
+    # Strategy: try multiple threshold levels and PSM modes
+    # LCD images have text (labels + digits) on dark backgrounds
+    # A low binary threshold captures all text regardless of brightness
 
-    if not results:
-        return ""
+    results = []
 
-    # Separate detections into labels and numbers
-    labels = []  # (x_center, y_center, text)
-    numbers = []  # (x_center, y_center, text)
-    others = []  # (x_center, y_center, text)
+    # Pass 1: Low threshold binary (captures all non-black content)
+    _, binary_low = cv2.threshold(gray, 50, 255, cv2.THRESH_BINARY)
+    text = pytesseract.image_to_string(binary_low, lang="eng", config="--psm 11 --oem 3").strip()
+    results.append(("binary_low_psm11", text))
 
-    lcd_label_set = {"sys", "dia", "pul", "pulse"}
+    # Pass 2: Otsu threshold
+    _, binary_otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    text = pytesseract.image_to_string(binary_otsu, lang="eng", config="--psm 11 --oem 3").strip()
+    results.append(("otsu_psm11", text))
 
-    for bbox, text, conf in results:
-        x_center = (bbox[0][0] + bbox[2][0]) / 2
-        y_center = (bbox[0][1] + bbox[2][1]) / 2
-        text_clean = text.strip()
+    # Pass 3: Inverted with PSM 6
+    inverted = cv2.bitwise_not(gray)
+    text = pytesseract.image_to_string(inverted, lang="eng", config="--psm 6 --oem 3").strip()
+    results.append(("inverted_psm6", text))
 
-        if text_clean.lower().rstrip(":") in lcd_label_set:
-            labels.append((x_center, y_center, text_clean))
-        elif text_clean.replace(".", "").replace(",", "").isdigit():
-            numbers.append((x_center, y_center, text_clean))
-        else:
-            others.append((x_center, y_center, text_clean))
+    # Pass 4: CLAHE enhanced with PSM 11
+    clahe = cv2.createCLAHE(clipLimit=10.0, tileGridSize=(4, 4))
+    enhanced = clahe.apply(gray)
+    text = pytesseract.image_to_string(enhanced, lang="eng", config="--psm 11 --oem 3").strip()
+    results.append(("clahe_psm11", text))
 
-    # Associate each label with the nearest number below or to the right
-    text_lines = []
-    used_numbers = set()
+    # Pass 5: Low threshold with PSM 6 (block of text)
+    text = pytesseract.image_to_string(binary_low, lang="eng", config="--psm 6 --oem 3").strip()
+    results.append(("binary_low_psm6", text))
 
-    for lx, ly, label_text in sorted(labels, key=lambda l: l[1]):
-        best_num = None
-        best_dist = float("inf")
+    # Select best result: prefer one with LCD labels AND digits
+    best_text = _select_best_tesseract_result(results)
 
-        for i, (nx, ny, num_text) in enumerate(numbers):
-            if i in used_numbers:
-                continue
+    logger.info("Tesseract extracted %d chars", len(best_text))
+    logger.debug("Tesseract output:\n%s", best_text)
+    return best_text
 
-            # Number should be below the label (within 200px vertical)
-            # or to the right on the same line (within 50px vertical, to the right)
-            dy = ny - ly
-            dx = nx - lx
 
-            if 0 < dy < 200 and abs(dx) < 200:
-                # Below the label
-                dist = dy + abs(dx) * 0.5
-            elif abs(dy) < 50 and dx > 0:
-                # Same line, to the right
-                dist = dx + abs(dy) * 2
-            else:
-                continue
+def _select_best_tesseract_result(results: list) -> str:
+    """Select the best Tesseract result from multiple passes.
 
-            if dist < best_dist:
-                best_dist = dist
-                best_num = (i, num_text)
+    Prefers results that contain both LCD labels (SYS/DIA/PUL) and digit values.
 
-        if best_num is not None:
-            used_numbers.add(best_num[0])
-            text_lines.append(f"{label_text} {best_num[1]}")
-        else:
-            text_lines.append(label_text)
+    Args:
+        results: List of (name, text) tuples.
 
-    # Add remaining numbers and other text
-    for i, (nx, ny, num_text) in enumerate(numbers):
-        if i not in used_numbers:
-            text_lines.append(num_text)
+    Returns:
+        Best text result.
+    """
+    import re
 
-    for ox, oy, other_text in others:
-        text_lines.append(other_text)
+    lcd_labels = {"sys", "dia", "pul"}
 
-    result = "\n".join(text_lines)
-    logger.info("EasyOCR extracted %d lines, %d chars", len(text_lines), len(result))
-    return result
+    scored = []
+    for name, text in results:
+        text_lower = text.lower()
+        label_count = sum(1 for lbl in lcd_labels if lbl in text_lower)
+        digit_sequences = re.findall(r"\d{2,3}", text)
+        digit_count = len(digit_sequences)
+        # Strongly prefer results with both labels and digits
+        score = label_count * 3 + digit_count * 2
+        if label_count > 0 and digit_count > 0:
+            score += 10  # Bonus for having both
+        scored.append((score, name, text))
+        logger.debug("Tesseract pass '%s': score=%d, labels=%d, digits=%d",
+                     name, score, label_count, digit_count)
+
+    scored.sort(reverse=True)
+
+    if scored and scored[0][0] > 0:
+        logger.debug("Selected Tesseract result: %s (score=%d)", scored[0][1], scored[0][0])
+        return scored[0][2]
+
+    # Fallback: return longest non-empty result
+    results_by_len = sorted(results, key=lambda r: len(r[1]), reverse=True)
+    return results_by_len[0][1] if results_by_len else ""
 
 
 def _extract_text_vietocr(image: np.ndarray, device: str) -> str:
@@ -273,13 +253,18 @@ def _extract_text_vietocr(image: np.ndarray, device: str) -> str:
     Returns:
         Extracted text string.
     """
+    from .preprocessor import preprocess_for_handwritten
+
     predictor = load_vietocr(device)
 
-    # Convert numpy array to PIL Image
+    # Apply handwritten-specific thresholding
     if len(image.shape) == 2:
-        pil_image = Image.fromarray(image).convert("RGB")
+        binary = preprocess_for_handwritten(image)
+        pil_image = Image.fromarray(binary).convert("RGB")
     else:
-        pil_image = Image.fromarray(image[:, :, ::-1]).convert("RGB")
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        binary = preprocess_for_handwritten(gray)
+        pil_image = Image.fromarray(binary).convert("RGB")
 
     # Detect text regions and OCR each one
     text_lines = _extract_regions_vietocr(pil_image, predictor)

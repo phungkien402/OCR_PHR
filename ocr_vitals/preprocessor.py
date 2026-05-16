@@ -8,16 +8,17 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
-def preprocess_image(image_path: str, mode: str = "auto") -> np.ndarray:
+def preprocess_image(image_path: str) -> np.ndarray:
     """Preprocess an image for OCR extraction.
+
+    Returns a grayscale, contrast-enhanced, denoised image.
+    Does NOT classify the image type — that is handled by ocr_engine.py.
 
     Args:
         image_path: Path to the input image.
-        mode: Preprocessing mode - "lcd" for digital displays,
-              "handwritten" for handwritten text, "auto" to detect.
 
     Returns:
-        Preprocessed image as numpy array.
+        Preprocessed grayscale image as numpy array.
     """
     logger.info("Preprocessing image: %s", image_path)
 
@@ -38,22 +39,48 @@ def preprocess_image(image_path: str, mode: str = "auto") -> np.ndarray:
         gray = cv2.resize(gray, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
         logger.debug("Resized image from %dx%d to %dx%d", w, h, new_w, new_h)
 
-    # Determine mode if auto
-    if mode == "auto":
-        mode = _detect_image_type(gray)
-        logger.debug("Auto-detected image type: %s", mode)
+    # Apply CLAHE for contrast enhancement
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
 
-    if mode == "lcd":
-        processed = _preprocess_lcd(gray)
-    else:
-        processed = _preprocess_handwritten(gray)
+    # Denoise
+    denoised = cv2.fastNlMeansDenoising(enhanced, None, h=10, templateWindowSize=7, searchWindowSize=21)
 
-    logger.info("Preprocessing complete (mode=%s)", mode)
+    logger.info("Preprocessing complete")
+    return denoised
+
+
+def preprocess_for_handwritten(image: np.ndarray) -> np.ndarray:
+    """Apply adaptive thresholding for handwritten text.
+
+    Args:
+        image: Grayscale preprocessed image.
+
+    Returns:
+        Binary image optimized for handwritten OCR.
+    """
+    processed = cv2.adaptiveThreshold(
+        image, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY, 11, 2
+    )
+    return processed
+
+
+def preprocess_for_lcd(image: np.ndarray) -> np.ndarray:
+    """Apply Otsu thresholding for LCD/digital display images.
+
+    Args:
+        image: Grayscale preprocessed image.
+
+    Returns:
+        Binary image optimized for LCD digit OCR.
+    """
+    _, processed = cv2.threshold(image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     return processed
 
 
 def preprocess_image_raw(image_path: str) -> np.ndarray:
-    """Load image with minimal preprocessing (for EasyOCR which does its own).
+    """Load image with minimal preprocessing (for engines that do their own).
 
     Args:
         image_path: Path to the input image.
@@ -75,63 +102,3 @@ def preprocess_image_raw(image_path: str) -> np.ndarray:
         img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
 
     return img
-
-
-def _preprocess_lcd(gray: np.ndarray) -> np.ndarray:
-    """Preprocess LCD/digital display image.
-
-    Optimized for 7-segment displays with high contrast digits.
-    """
-    # Apply CLAHE with higher clip limit for LCD
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(gray)
-
-    # Light denoise (preserve sharp digit edges)
-    denoised = cv2.fastNlMeansDenoising(enhanced, None, h=5, templateWindowSize=7, searchWindowSize=21)
-
-    # Otsu thresholding for LCD/digital display images
-    _, processed = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-    return processed
-
-
-def _preprocess_handwritten(gray: np.ndarray) -> np.ndarray:
-    """Preprocess handwritten text image.
-
-    Optimized for varied strokes and textured backgrounds.
-    """
-    # Apply CLAHE for contrast enhancement
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(gray)
-
-    # Denoise
-    denoised = cv2.fastNlMeansDenoising(enhanced, None, h=10, templateWindowSize=7, searchWindowSize=21)
-
-    # Adaptive thresholding for handwritten images
-    processed = cv2.adaptiveThreshold(
-        denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY, 11, 2
-    )
-
-    return processed
-
-
-def _detect_image_type(image: np.ndarray) -> str:
-    """Heuristic to detect if image is LCD display or handwritten.
-
-    Uses edge density and contrast variance to distinguish between
-    digital displays (sharp edges, uniform backgrounds) and
-    handwritten text (varied strokes, textured backgrounds).
-    """
-    # Calculate edge density using Canny
-    edges = cv2.Canny(image, 50, 150)
-    edge_density = np.sum(edges > 0) / edges.size
-
-    # Calculate local variance
-    local_var = cv2.Laplacian(image, cv2.CV_64F).var()
-
-    # LCD displays tend to have lower edge density and higher local variance
-    # due to sharp digit boundaries on uniform backgrounds
-    if edge_density < 0.05 and local_var > 500:
-        return "lcd"
-    return "handwritten"

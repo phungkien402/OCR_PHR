@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .config import DEVICE
-from .ocr_engine import extract_text
+from .ocr_engine import extract_text, detect_image_mode
 from .parser import parse_vitals
 from .preprocessor import preprocess_image, preprocess_image_raw
 from .validator import validate_vitals
@@ -34,29 +34,25 @@ def process_image(image_path: str, device: str, mode: str = "auto") -> dict:
     logger.info("Processing image: %s (mode=%s)", filename, mode)
 
     try:
-        # Step 1: Preprocess
-        # For LCD mode, also prepare raw image (EasyOCR does its own preprocessing)
-        preprocessed = preprocess_image(image_path)
+        # Step 1: Load raw image for detection and LCD OCR
+        raw_img = preprocess_image_raw(image_path)
 
-        # Step 2: OCR - use raw image for LCD, preprocessed for handwritten
-        if mode == "lcd":
-            raw_img = preprocess_image_raw(image_path)
-            raw_text = extract_text(raw_img, device=device, mode=mode)
-            ocr_engine_used = "easyocr_en"
-        elif mode == "handwritten":
-            raw_text = extract_text(preprocessed, device=device, mode=mode)
-            ocr_engine_used = "vietocr_vgg_transformer"
+        # Step 2: Determine OCR mode
+        if mode == "auto":
+            detected_mode = detect_image_mode(raw_img)
         else:
-            # Auto mode: detect from preprocessed, then use appropriate image
-            from .ocr_engine import detect_image_mode
-            detected_mode = detect_image_mode(preprocessed)
-            if detected_mode == "lcd":
-                raw_img = preprocess_image_raw(image_path)
-                raw_text = extract_text(raw_img, device=device, mode="lcd")
-                ocr_engine_used = "easyocr_en"
-            else:
-                raw_text = extract_text(preprocessed, device=device, mode="handwritten")
-                ocr_engine_used = "vietocr_vgg_transformer"
+            detected_mode = mode
+
+        # Step 3: OCR based on detected mode
+        if detected_mode == "lcd":
+            # Tesseract works best on the raw/lightly processed image
+            raw_text = extract_text(raw_img, device=device, mode="lcd")
+            ocr_engine_used = "tesseract_eng"
+        else:
+            # VietOCR needs preprocessed image
+            preprocessed = preprocess_image(image_path)
+            raw_text = extract_text(preprocessed, device=device, mode="handwritten")
+            ocr_engine_used = "vietocr_vgg_transformer"
 
         logger.info("OCR extracted text length: %d chars", len(raw_text))
 

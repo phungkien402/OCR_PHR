@@ -64,6 +64,10 @@ def parse_vitals(raw_text: str) -> dict:
 def _parse_lcd_labels(text: str) -> dict:
     """Parse LCD blood pressure monitor labels (SYS, DIA, PUL).
 
+    Uses two strategies:
+    1. Same-line pattern: "SYS 128", "DIA 78", "PUL 72"
+    2. Line-by-line sequential: label on one line, value on next line
+
     Args:
         text: Normalized OCR text.
 
@@ -79,23 +83,36 @@ def _parse_lcd_labels(text: str) -> dict:
     tam_truong = None
     units = []
 
-    # Search for LCD label patterns: "SYS 128", "DIA 78", "PUL 72"
-    # Also handle "SYS:128", "SYS.128", "SYS128"
+    # Strategy 1: Same-line pattern matching
+    # "SYS 128", "SYS:128", "SYS.128"
     for label, field in LCD_LABELS.items():
-        # Pattern: label followed by optional separator then number
         pattern = re.escape(label) + r"[\s.:;=]*(\d{2,3})"
         match = re.search(pattern, text)
         if match:
             value = int(match.group(1))
             if field == "huyet_ap.tam_thu":
                 tam_thu = value
-                logger.debug("LCD: SYS = %d", value)
+                logger.debug("LCD same-line: SYS = %d", value)
             elif field == "huyet_ap.tam_truong":
                 tam_truong = value
-                logger.debug("LCD: DIA = %d", value)
+                logger.debug("LCD same-line: DIA = %d", value)
             elif field == "mach":
                 result["mach"] = value
-                logger.debug("LCD: PUL = %d", value)
+                logger.debug("LCD same-line: PUL = %d", value)
+
+    # Strategy 2: Line-by-line sequential matching
+    # Label on one line, digit value on the next non-empty line
+    if tam_thu is None or tam_truong is None or result["mach"] is None:
+        line_results = _parse_lcd_lines(text)
+        if tam_thu is None and line_results.get("tam_thu") is not None:
+            tam_thu = line_results["tam_thu"]
+            logger.debug("LCD line-seq: SYS = %d", tam_thu)
+        if tam_truong is None and line_results.get("tam_truong") is not None:
+            tam_truong = line_results["tam_truong"]
+            logger.debug("LCD line-seq: DIA = %d", tam_truong)
+        if result["mach"] is None and line_results.get("mach") is not None:
+            result["mach"] = line_results["mach"]
+            logger.debug("LCD line-seq: PUL = %d", result["mach"])
 
     # Capture unit metadata
     for unit in UNIT_LABELS:
@@ -110,6 +127,117 @@ def _parse_lcd_labels(text: str) -> dict:
         logger.debug("LCD units detected: %s", units)
 
     return result
+
+
+def _parse_lcd_lines(text: str) -> dict:
+    """Parse LCD values using line-by-line sequential matching.
+
+    When OCR returns labels and values on separate lines, associate them
+    by proximity: the number on the next line after a label belongs to it.
+
+    Args:
+        text: Normalized OCR text.
+
+    Returns:
+        Dict with tam_thu, tam_truong, mach values (or None).
+    """
+    lines = text.split("\n")
+    result = {"tam_thu": None, "tam_truong": None, "mach": None}
+
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+
+        # Check if this line contains a label
+        label_field = _identify_lcd_label(line)
+
+        if label_field is not None:
+            # Look for digit value: first check same line after label
+            # Then check subsequent lines
+            value = _extract_digit_from_line(line, label_field)
+
+            if value is None:
+                # Search next non-empty lines for a digit
+                for j in range(i + 1, min(i + 3, len(lines))):
+                    next_line = lines[j].strip()
+                    if not next_line:
+                        continue
+                    # Skip lines that are model numbers (e.g. D2-65A)
+                    if re.match(r"^[A-Za-z]\d+[-]?\w*$", next_line):
+                        continue
+                    # Skip lines that are other labels
+                    if _identify_lcd_label(next_line):
+                        break
+                    # Check if next line is purely a number
+                    digit_match = re.search(r"^(\d{2,3})$", next_line)
+                    if digit_match:
+                        value = int(digit_match.group(1))
+                        break
+                    # Check if next line contains a number (possibly with units)
+                    digit_match = re.search(r"(\d{2,3})", next_line)
+                    if digit_match and not _identify_lcd_label(next_line):
+                        # Make sure it's not part of a model number
+                        if not re.search(r"[A-Za-z]\d+[-]?\w*", next_line):
+                            value = int(digit_match.group(1))
+                            break
+
+            if value is not None:
+                if label_field == "tam_thu":
+                    result["tam_thu"] = value
+                elif label_field == "tam_truong":
+                    result["tam_truong"] = value
+                elif label_field == "mach":
+                    result["mach"] = value
+
+        i += 1
+
+    return result
+
+
+def _identify_lcd_label(line: str) -> object:
+    """Identify if a line contains an LCD label.
+
+    Args:
+        line: A single line of text (already lowercase).
+
+    Returns:
+        Field name ("tam_thu", "tam_truong", "mach") or None.
+    """
+    line_clean = line.strip().lower()
+
+    # Check for SYS variants
+    if re.search(r"\bsys\b|systolic", line_clean):
+        return "tam_thu"
+
+    # Check for DIA variants
+    if re.search(r"\bdia\b|diastolic", line_clean):
+        return "tam_truong"
+
+    # Check for PUL variants
+    if re.search(r"\bpul\b|\bpulse\b|pul/min|pulse/min", line_clean):
+        return "mach"
+
+    return None
+
+
+def _extract_digit_from_line(line: str, label_field: str) -> object:
+    """Try to extract a digit value from the same line as a label.
+
+    Args:
+        line: The line containing the label.
+        label_field: Which field the label represents.
+
+    Returns:
+        Integer value or None.
+    """
+    # Remove the label text and look for remaining digits
+    cleaned = re.sub(r"(sys|dia|pul|pulse|systolic|diastolic|/min)", "", line, flags=re.IGNORECASE)
+    # Exclude model numbers like D2-65A
+    cleaned = re.sub(r"[a-zA-Z]\d+-?\d*[a-zA-Z]?", "", cleaned)
+    match = re.search(r"(\d{2,3})", cleaned)
+    if match:
+        return int(match.group(1))
+    return None
 
 
 def _merge_vitals(keyword_vitals: dict, lcd_vitals: dict) -> dict:
