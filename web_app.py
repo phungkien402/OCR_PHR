@@ -1,14 +1,14 @@
 """Web interface for OCR Vital Signs pipeline.
 
 Usage:
-    uvicorn web_app:app --host 0.0.0.0 --port 8080
+    uvicorn web_app:app --host 0.0.0.0 --port 8502
 """
 
 import json
 import os
 import tempfile
 
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 
 app = FastAPI(title="OCR Vital Signs")
@@ -28,6 +28,17 @@ body {
 .container { max-width: 900px; margin: 0 auto; }
 h1 { text-align: center; margin-bottom: 0.5rem; color: #1a1a2e; font-size: 1.8rem; }
 .subtitle { text-align: center; color: #666; margin-bottom: 2rem; font-size: 0.95rem; }
+.tabs {
+    display: flex; gap: 0; margin-bottom: 1.5rem; border-bottom: 2px solid #e0e0e0;
+}
+.tab {
+    padding: 0.8rem 1.5rem; cursor: pointer; font-weight: 600; color: #888;
+    border-bottom: 2px solid transparent; margin-bottom: -2px; transition: all 0.2s;
+}
+.tab:hover { color: #4a90d9; }
+.tab.active { color: #4a90d9; border-bottom-color: #4a90d9; }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
 .card {
     background: #fff; border-radius: 12px; padding: 2rem;
     box-shadow: 0 2px 12px rgba(0,0,0,0.08); margin-bottom: 1.5rem;
@@ -59,11 +70,16 @@ h1 { text-align: center; margin-bottom: 0.5rem; color: #1a1a2e; font-size: 1.8re
 .result-section { display: none; }
 .result-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
 .result-header h2 { font-size: 1.2rem; color: #1a1a2e; }
-.vitals-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+.vitals-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
 .vital-card { background: #f8fafc; border-radius: 8px; padding: 1rem; text-align: center; border: 1px solid #e8ecf0; }
-.vital-card .label { font-size: 0.75rem; text-transform: uppercase; color: #888; margin-bottom: 0.3rem; }
+.vital-card.out-of-range { border-color: #fca5a5; background: #fef2f2; }
+.vital-card .label-vn { font-size: 0.85rem; font-weight: 600; color: #1a1a2e; margin-bottom: 0.2rem; }
+.vital-card .label-en { font-size: 0.7rem; color: #888; margin-bottom: 0.3rem; }
 .vital-card .value { font-size: 1.5rem; font-weight: 700; color: #1a1a2e; }
 .vital-card .value.null { color: #ccc; font-size: 1rem; }
+.vital-card .value.out-of-range { color: #dc2626; }
+.vital-card .unit { font-size: 0.7rem; color: #888; margin-top: 0.2rem; }
+.vital-card .range { font-size: 0.65rem; color: #aaa; margin-top: 0.1rem; }
 .json-output {
     background: #1e1e2e; color: #cdd6f4; border-radius: 8px; padding: 1.5rem;
     overflow-x: auto; font-family: 'JetBrains Mono', 'Fira Code', monospace;
@@ -78,6 +94,23 @@ h1 { text-align: center; margin-bottom: 0.5rem; color: #1a1a2e; font-size: 1.8re
     display: none; background: #fef2f2; border: 1px solid #fecaca;
     border-radius: 8px; padding: 1rem 1.5rem; color: #dc2626; margin-top: 1rem;
 }
+.raw-text-output {
+    background: #1e1e2e; color: #a6e3a1; border-radius: 8px; padding: 1.5rem;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 0.9rem;
+    line-height: 1.6; white-space: pre-wrap; word-break: break-word; min-height: 100px;
+}
+.mode-select {
+    margin-top: 1rem; display: flex; gap: 0.5rem; align-items: center;
+}
+.mode-select label { font-weight: 600; color: #555; font-size: 0.9rem; }
+.mode-select select {
+    padding: 0.5rem 1rem; border: 1px solid #ddd; border-radius: 6px;
+    font-size: 0.9rem; background: #fff; cursor: pointer;
+}
+.meta-badge {
+    display: inline-block; background: #e8ecf0; border-radius: 4px;
+    padding: 0.2rem 0.6rem; font-size: 0.75rem; color: #555; margin-top: 0.5rem;
+}
 input[type="file"] { display: none; }
 </style>
 </head>
@@ -85,108 +118,256 @@ input[type="file"] { display: none; }
 <div class="container">
     <h1>OCR Vital Signs</h1>
     <p class="subtitle">Upload a blood pressure monitor image to extract vital signs</p>
-    <div class="card">
-        <div class="drop-zone" id="dropZone">
-            <p>Drop image here or click to browse</p>
-            <small>Supports JPG, PNG</small>
-        </div>
-        <input type="file" id="fileInput" accept="image/jpeg,image/png">
-        <div class="preview-container" id="previewContainer">
-            <img id="previewImg" alt="Preview">
-            <p class="filename" id="fileName"></p>
-        </div>
-        <button class="btn btn-primary" id="processBtn" disabled>Process</button>
+
+    <div class="tabs">
+        <div class="tab active" data-tab="process">Process</div>
+        <div class="tab" data-tab="raw-ocr">Raw OCR Test</div>
     </div>
-    <div class="spinner" id="spinner"></div>
-    <div class="error-box" id="errorBox"></div>
-    <div class="card result-section" id="resultSection">
-        <div class="result-header"><h2>Extracted Vitals</h2></div>
-        <div class="vitals-grid" id="vitalsGrid"></div>
-        <h2 style="font-size:1rem; margin-bottom:0.8rem; color:#1a1a2e;">Raw JSON</h2>
-        <div class="json-output" id="jsonOutput"></div>
+
+    <!-- TAB 1: Process -->
+    <div class="tab-content active" id="tab-process">
+        <div class="card">
+            <div class="drop-zone" id="dropZone1">
+                <p>Drop image here or click to browse</p>
+                <small>Supports JPG, PNG</small>
+            </div>
+            <input type="file" id="fileInput1" accept="image/jpeg,image/png">
+            <div class="preview-container" id="previewContainer1">
+                <img id="previewImg1" alt="Preview">
+                <p class="filename" id="fileName1"></p>
+            </div>
+            <button class="btn btn-primary" id="processBtn" disabled>Process</button>
+        </div>
+        <div class="spinner" id="spinner1"></div>
+        <div class="error-box" id="errorBox1"></div>
+        <div class="card result-section" id="resultSection1">
+            <div class="result-header"><h2>Extracted Vitals</h2></div>
+            <div class="vitals-grid" id="vitalsGrid"></div>
+            <h2 style="font-size:1rem; margin-bottom:0.8rem; color:#1a1a2e;">Raw JSON</h2>
+            <div class="json-output" id="jsonOutput"></div>
+        </div>
+    </div>
+
+    <!-- TAB 2: Raw OCR Test -->
+    <div class="tab-content" id="tab-raw-ocr">
+        <div class="card">
+            <div class="drop-zone" id="dropZone2">
+                <p>Drop image here or click to browse</p>
+                <small>Supports JPG, PNG</small>
+            </div>
+            <input type="file" id="fileInput2" accept="image/jpeg,image/png">
+            <div class="preview-container" id="previewContainer2">
+                <img id="previewImg2" alt="Preview">
+                <p class="filename" id="fileName2"></p>
+            </div>
+            <div class="mode-select">
+                <label>Mode:</label>
+                <select id="modeSelect">
+                    <option value="auto">Auto</option>
+                    <option value="lcd">LCD (Qwen3-VL:4b)</option>
+                    <option value="handwritten">Handwritten (VietOCR)</option>
+                </select>
+            </div>
+            <button class="btn btn-primary" id="rawOcrBtn" disabled>Extract Raw Text</button>
+        </div>
+        <div class="spinner" id="spinner2"></div>
+        <div class="error-box" id="errorBox2"></div>
+        <div class="card result-section" id="resultSection2">
+            <div class="result-header"><h2>Raw OCR Output</h2></div>
+            <div style="margin-bottom:0.8rem;">
+                <span class="meta-badge" id="modeDetected"></span>
+                <span class="meta-badge" id="engineUsed"></span>
+            </div>
+            <div class="raw-text-output" id="rawTextOutput"></div>
+        </div>
     </div>
 </div>
+
 <script>
-const dropZone = document.getElementById('dropZone');
-const fileInput = document.getElementById('fileInput');
-const previewContainer = document.getElementById('previewContainer');
-const previewImg = document.getElementById('previewImg');
-const fileName = document.getElementById('fileName');
-const processBtn = document.getElementById('processBtn');
-const spinner = document.getElementById('spinner');
-const errorBox = document.getElementById('errorBox');
-const resultSection = document.getElementById('resultSection');
-const vitalsGrid = document.getElementById('vitalsGrid');
-const jsonOutput = document.getElementById('jsonOutput');
-let selectedFile = null;
-
-dropZone.addEventListener('click', () => fileInput.click());
-dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
-dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
-dropZone.addEventListener('drop', (e) => {
-    e.preventDefault(); dropZone.classList.remove('dragover');
-    if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+// Tab switching
+document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+        tab.classList.add('active');
+        document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+    });
 });
-fileInput.addEventListener('change', () => { if (fileInput.files.length) handleFile(fileInput.files[0]); });
 
-function handleFile(file) {
-    if (!file.type.match(/^image\/(jpeg|png)$/)) { showError('Please upload a JPG or PNG image.'); return; }
-    selectedFile = file;
+// === TAB 1: Process ===
+const dropZone1 = document.getElementById('dropZone1');
+const fileInput1 = document.getElementById('fileInput1');
+const previewContainer1 = document.getElementById('previewContainer1');
+const previewImg1 = document.getElementById('previewImg1');
+const fileName1 = document.getElementById('fileName1');
+const processBtn = document.getElementById('processBtn');
+const spinner1 = document.getElementById('spinner1');
+const errorBox1 = document.getElementById('errorBox1');
+const resultSection1 = document.getElementById('resultSection1');
+let selectedFile1 = null;
+
+dropZone1.addEventListener('click', () => fileInput1.click());
+dropZone1.addEventListener('dragover', (e) => { e.preventDefault(); dropZone1.classList.add('dragover'); });
+dropZone1.addEventListener('dragleave', () => dropZone1.classList.remove('dragover'));
+dropZone1.addEventListener('drop', (e) => {
+    e.preventDefault(); dropZone1.classList.remove('dragover');
+    if (e.dataTransfer.files.length) handleFile1(e.dataTransfer.files[0]);
+});
+fileInput1.addEventListener('change', () => { if (fileInput1.files.length) handleFile1(fileInput1.files[0]); });
+
+function handleFile1(file) {
+    if (!file.type.match(/^image\/(jpeg|png)$/)) { showError1('Please upload a JPG or PNG image.'); return; }
+    selectedFile1 = file;
     const reader = new FileReader();
     reader.onload = (e) => {
-        previewImg.src = e.target.result;
-        previewContainer.style.display = 'block';
-        fileName.textContent = file.name + ' (' + (file.size / 1024).toFixed(1) + ' KB)';
+        previewImg1.src = e.target.result;
+        previewContainer1.style.display = 'block';
+        fileName1.textContent = file.name + ' (' + (file.size / 1024).toFixed(1) + ' KB)';
     };
     reader.readAsDataURL(file);
     processBtn.disabled = false;
-    resultSection.style.display = 'none';
-    errorBox.style.display = 'none';
+    resultSection1.style.display = 'none';
+    errorBox1.style.display = 'none';
 }
 
 processBtn.addEventListener('click', async () => {
-    if (!selectedFile) return;
+    if (!selectedFile1) return;
     processBtn.disabled = true;
-    spinner.style.display = 'block';
-    resultSection.style.display = 'none';
-    errorBox.style.display = 'none';
+    spinner1.style.display = 'block';
+    resultSection1.style.display = 'none';
+    errorBox1.style.display = 'none';
     const formData = new FormData();
-    formData.append('file', selectedFile);
+    formData.append('file', selectedFile1);
     try {
         const resp = await fetch('/process', { method: 'POST', body: formData });
         const data = await resp.json();
-        if (!resp.ok) { showError(data.detail || 'Processing failed'); return; }
+        if (!resp.ok) { showError1(data.detail || 'Processing failed'); return; }
         displayResult(data);
-    } catch (err) { showError('Connection error: ' + err.message); }
-    finally { spinner.style.display = 'none'; processBtn.disabled = false; }
+    } catch (err) { showError1('Connection error: ' + err.message); }
+    finally { spinner1.style.display = 'none'; processBtn.disabled = false; }
 });
 
-function showError(msg) { errorBox.textContent = msg; errorBox.style.display = 'block'; }
+function showError1(msg) { errorBox1.textContent = msg; errorBox1.style.display = 'block'; }
 
 function displayResult(data) {
     const vitals = data.vitals || {};
+    const meta = data.fields_meta || {};
+    const validation = data.validation || {};
     const bp = vitals.huyet_ap || {};
+
     const cards = [
-        { label: 'SYS (mmHg)', value: bp.tam_thu },
-        { label: 'DIA (mmHg)', value: bp.tam_truong },
-        { label: 'Pulse (/min)', value: vitals.mach },
-        { label: 'Temp (°C)', value: vitals.nhiet_do },
-        { label: 'SpO2 (%)', value: vitals.spo2 },
-        { label: 'Resp Rate', value: vitals.nhip_tho },
+        { key: 'huyet_ap.tam_thu', field: 'huyet_ap', sub: 'tam_thu', value: bp.tam_thu },
+        { key: 'huyet_ap.tam_truong', field: 'huyet_ap', sub: 'tam_truong', value: bp.tam_truong },
+        { key: 'mach', field: 'mach', value: vitals.mach },
+        { key: 'nhiet_do', field: 'nhiet_do', value: vitals.nhiet_do },
+        { key: 'spo2', field: 'spo2', value: vitals.spo2 },
+        { key: 'nhip_tho', field: 'nhip_tho', value: vitals.nhip_tho },
+        { key: 'can_nang', field: 'can_nang', value: vitals.can_nang },
+        { key: 'chieu_cao', field: 'chieu_cao', value: vitals.chieu_cao },
     ];
+
+    const vitalsGrid = document.getElementById('vitalsGrid');
     vitalsGrid.innerHTML = cards.map(c => {
+        const info = meta[c.field] || {};
         const isNull = c.value == null;
-        return '<div class="vital-card"><div class="label">' + c.label +
-            '</div><div class="value ' + (isNull ? 'null' : '') + '">' +
-            (isNull ? '—' : c.value) + '</div></div>';
+        const isOutOfRange = validation[c.key] && validation[c.key].out_of_range;
+        let labelVn = info.label_vn || c.field;
+        let labelEn = info.label_en || '';
+        let unit = info.unit || '';
+        let normalRange = '';
+
+        if (c.sub) {
+            labelVn = c.sub === 'tam_thu' ? 'SYS (Tâm thu)' : 'DIA (Tâm trương)';
+            labelEn = c.sub === 'tam_thu' ? 'Systolic' : 'Diastolic';
+            unit = 'mmHg';
+            const nr = info.normal_range;
+            if (nr && nr[c.sub]) normalRange = nr[c.sub][0] + '-' + nr[c.sub][1];
+        } else {
+            const nr = info.normal_range;
+            if (nr && !nr.tam_thu) normalRange = nr[0] + '-' + nr[1];
+        }
+
+        return '<div class="vital-card ' + (isOutOfRange ? 'out-of-range' : '') + '">' +
+            '<div class="label-vn">' + labelVn + '</div>' +
+            '<div class="label-en">' + labelEn + '</div>' +
+            '<div class="value ' + (isNull ? 'null' : '') + (isOutOfRange ? ' out-of-range' : '') + '">' +
+            (isNull ? '—' : c.value) + '</div>' +
+            '<div class="unit">' + unit + '</div>' +
+            (normalRange ? '<div class="range">Normal: ' + normalRange + '</div>' : '') +
+            '</div>';
     }).join('');
-    jsonOutput.innerHTML = syntaxHighlight(JSON.stringify(data, null, 2));
-    resultSection.style.display = 'block';
+
+    document.getElementById('jsonOutput').innerHTML = syntaxHighlight(JSON.stringify(data, null, 2));
+    resultSection1.style.display = 'block';
 }
 
+// === TAB 2: Raw OCR Test ===
+const dropZone2 = document.getElementById('dropZone2');
+const fileInput2 = document.getElementById('fileInput2');
+const previewContainer2 = document.getElementById('previewContainer2');
+const previewImg2 = document.getElementById('previewImg2');
+const fileName2 = document.getElementById('fileName2');
+const rawOcrBtn = document.getElementById('rawOcrBtn');
+const spinner2 = document.getElementById('spinner2');
+const errorBox2 = document.getElementById('errorBox2');
+const resultSection2 = document.getElementById('resultSection2');
+let selectedFile2 = null;
+
+dropZone2.addEventListener('click', () => fileInput2.click());
+dropZone2.addEventListener('dragover', (e) => { e.preventDefault(); dropZone2.classList.add('dragover'); });
+dropZone2.addEventListener('dragleave', () => dropZone2.classList.remove('dragover'));
+dropZone2.addEventListener('drop', (e) => {
+    e.preventDefault(); dropZone2.classList.remove('dragover');
+    if (e.dataTransfer.files.length) handleFile2(e.dataTransfer.files[0]);
+});
+fileInput2.addEventListener('change', () => { if (fileInput2.files.length) handleFile2(fileInput2.files[0]); });
+
+function handleFile2(file) {
+    if (!file.type.match(/^image\/(jpeg|png)$/)) { showError2('Please upload a JPG or PNG image.'); return; }
+    selectedFile2 = file;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        previewImg2.src = e.target.result;
+        previewContainer2.style.display = 'block';
+        fileName2.textContent = file.name + ' (' + (file.size / 1024).toFixed(1) + ' KB)';
+    };
+    reader.readAsDataURL(file);
+    rawOcrBtn.disabled = false;
+    resultSection2.style.display = 'none';
+    errorBox2.style.display = 'none';
+}
+
+rawOcrBtn.addEventListener('click', async () => {
+    if (!selectedFile2) return;
+    rawOcrBtn.disabled = true;
+    spinner2.style.display = 'block';
+    resultSection2.style.display = 'none';
+    errorBox2.style.display = 'none';
+    const formData = new FormData();
+    formData.append('file', selectedFile2);
+    formData.append('mode', document.getElementById('modeSelect').value);
+    try {
+        const resp = await fetch('/raw-ocr', { method: 'POST', body: formData });
+        const data = await resp.json();
+        if (!resp.ok) { showError2(data.detail || 'OCR failed'); return; }
+        displayRawOcr(data);
+    } catch (err) { showError2('Connection error: ' + err.message); }
+    finally { spinner2.style.display = 'none'; rawOcrBtn.disabled = false; }
+});
+
+function showError2(msg) { errorBox2.textContent = msg; errorBox2.style.display = 'block'; }
+
+function displayRawOcr(data) {
+    document.getElementById('modeDetected').textContent = 'Mode: ' + data.mode_detected;
+    document.getElementById('engineUsed').textContent = 'Engine: ' + data.engine;
+    document.getElementById('rawTextOutput').textContent = data.raw_text || '(empty)';
+    resultSection2.style.display = 'block';
+}
+
+// === Shared ===
 function syntaxHighlight(json) {
     return json.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-        .replace(/("(\u[a-zA-Z0-9]{4}|\[^u]|[^\"])*"(\s*:)?|(true|false)|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?|null)/g,
+        .replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?|\bnull\b)/g,
         function(match) {
             let cls = 'number';
             if (/^"/.test(match)) { cls = /:$/.test(match) ? 'key' : 'string'; }
@@ -208,7 +389,7 @@ async def index():
 
 @app.post("/process")
 async def process(file: UploadFile = File(...)):
-    """Process an uploaded image through the OCR vital signs pipeline."""
+    """Process an uploaded image through the full OCR vital signs pipeline."""
     if file.content_type not in ("image/jpeg", "image/png"):
         return JSONResponse(
             status_code=400,
@@ -235,7 +416,62 @@ async def process(file: UploadFile = File(...)):
         os.unlink(tmp_path)
 
 
+@app.post("/raw-ocr")
+async def raw_ocr(file: UploadFile = File(...), mode: str = Form("auto")):
+    """Run only the OCR layer (no parsing, no validation).
+
+    Returns raw text from the OCR engine.
+    """
+    if file.content_type not in ("image/jpeg", "image/png"):
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "Only JPG and PNG images are supported."},
+        )
+
+    if mode not in ("auto", "lcd", "handwritten"):
+        mode = "auto"
+
+    suffix = ".png" if "png" in file.content_type else ".jpg"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        content = await file.read()
+        tmp.write(content)
+        tmp_path = tmp.name
+
+    try:
+        import cv2
+        from ocr_vitals.ocr_engine import extract_text, detect_image_mode
+        from ocr_vitals.preprocessor import preprocess_image_raw
+
+        raw_img = preprocess_image_raw(tmp_path)
+
+        if mode == "auto":
+            detected_mode = detect_image_mode(raw_img)
+        else:
+            detected_mode = mode
+
+        raw_text = extract_text(raw_img, device="cuda:0", mode=detected_mode,
+                                image_path=tmp_path)
+
+        if detected_mode == "lcd":
+            engine = "qwen3_vl_4b_ollama"
+        else:
+            engine = "vietocr_vgg_transformer"
+
+        return JSONResponse(content={
+            "raw_text": raw_text,
+            "mode_detected": detected_mode,
+            "engine": engine,
+        })
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"detail": f"OCR error: {str(e)}"},
+        )
+    finally:
+        os.unlink(tmp_path)
+
+
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    uvicorn.run(app, host="0.0.0.0", port=8502)

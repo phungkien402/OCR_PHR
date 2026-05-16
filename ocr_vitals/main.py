@@ -66,10 +66,25 @@ def process_image(image_path: str, device: str, mode: str = "auto") -> dict:
         # Step 4: Validate
         validation, missing_fields = validate_vitals(vitals)
 
+        # Step 5: Build field metadata with Vietnamese names, units, ranges
+        from .config import VITALS_INFO
+        fields_meta = {}
+        for field, info in VITALS_INFO.items():
+            value = vitals.get(field)
+            meta = {
+                "label_vn": info["label_vn"],
+                "label_en": info["label_en"],
+                "unit": info["unit"],
+                "normal_range": info["normal_range"],
+                "value": value,
+            }
+            fields_meta[field] = meta
+
         result = {
             "source_image": filename,
             "ocr_raw_text": raw_text,
             "vitals": vitals,
+            "fields_meta": fields_meta,
             "validation": validation,
             "missing_fields": missing_fields,
             "ocr_engine": ocr_engine_used,
