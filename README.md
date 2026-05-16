@@ -1,76 +1,74 @@
 # OCR Vital Signs Extraction Pipeline
 
-Extract vital signs from medical images (blood pressure monitor displays and handwritten vital signs forms) using a vision-language model (Qwen3-VL) and VietOCR, outputting structured JSON.
+Trích xuất **dấu hiệu sinh tồn** từ ảnh y khoa (màn hình máy đo huyết áp, ảnh biểu mẫu/ghi chú viết tay) bằng **Vision-Language Model (Qwen3-VL qua Ollama)** và **VietOCR**, sau đó chuẩn hoá thành **JSON có cấu trúc**.
 
-## Architecture
+## Kiến trúc tổng quan
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    Input Image                                │
+│                        Input Image                          │
 └─────────────────────┬───────────────────────────────────────┘
                       │
                       ▼
 ┌─────────────────────────────────────────────────────────────┐
-│              Image Mode Detection                             │
-│   (contrast ratio, histogram bimodality, region analysis)    │
+│                 Image Mode Detection                         │
+│ (contrast ratio, histogram bimodality, region analysis, ...) │
 └──────────┬──────────────────────────────────┬───────────────┘
            │                                  │
-     LCD detected                     Handwritten detected
+     LCD detected                      Handwritten detected
            │                                  │
            ▼                                  ▼
-┌─────────────────────────┐    ┌──────────────────────────────┐
-│  Qwen3-VL:4b (Ollama)   │    │  VietOCR (vgg_transformer)    │
-│  Vision-language model   │    │  Vietnamese handwritten text  │
-│  Original image direct   │    └──────────────────────────────┘
-│  localhost:11434         │
-└──────────┬──────────────┘
+┌─────────────────────────┐      ┌──────────────────────────────┐
+│  Qwen3-VL:4b (Ollama)    │      │  VietOCR (vgg_transformer)    │
+│  Read LCD digits directly │      │  Vietnamese handwritten text  │
+│  localhost:11434          │      └──────────────────────────────┘
+└──────────┬───────────────┘
            │ (fallback if Ollama unavailable)
            ▼
 ┌─────────────────────────┐
-│  Screen Warp + Tesseract │ ◄── Fallback only
+│  Screen Warp + Tesseract │  ◄── Fallback only
 │  Perspective correction  │
 │  + multi-pass OCR        │
 └──────────┬──────────────┘
            │
            ▼
 ┌─────────────────────────────────────────────────────────────┐
-│              Regex Parser + Vital Signs Extraction            │
-│   SYS → huyet_ap.tam_thu, DIA → huyet_ap.tam_truong         │
-│   PUL → mach                                                 │
-└──────────────────────────────────────────────────────────────┘
+│             Regex Parser + Vital Signs Extraction            │
+│ SYS → huyet_ap.tam_thu | DIA → huyet_ap.tam_truong | PUL → mach │
+└─────────────────────────────────────────────────────────────┘
            │
            ▼
 ┌─────────────────────────────────────────────────────────────┐
-│              Physiological Range Validation                   │
-└──────────────────────────────────────────────────────────────┘
+│            Physiological Range Validation                    │
+└─────────────────────────────────────────────────────────────┘
            │
            ▼
 ┌─────────────────────────────────────────────────────────────┐
-│              Structured JSON Output                           │
+│              Structured JSON Output                          │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## Features
+## Tính năng
 
-- **LCD OCR pipeline:**
-  - **Qwen3-VL:4b** via Ollama — vision-language model reads LCD digits directly from the original image (no warp needed)
-  - Fallback to screen warp + Tesseract if Ollama is unavailable
-- **Handwritten OCR:** VietOCR (`vgg_transformer`) for Vietnamese handwritten text
-- Auto-detection of image type (LCD vs handwritten)
-- Regex-based parser for 7 vital sign fields
-- LCD label recognition (SYS, DIA, PUL) with structured output
-- Physiological range validation
-- CLI with single image and batch directory support
-- Automatic GPU/CPU fallback
+- **LCD OCR pipeline**
+  - **Qwen3-VL:4b** qua **Ollama** đọc trực tiếp chữ số trên màn hình LCD từ ảnh gốc (không cần warp)
+  - Fallback sang **screen warp + Tesseract** khi Ollama không khả dụng
+- **Handwritten OCR**: **VietOCR** (`vgg_transformer`) cho chữ viết tay tiếng Việt
+- Tự động phát hiện loại ảnh (**LCD** vs **handwritten**)
+- Parser dựa trên regex cho **7 trường** dấu hiệu sinh tồn
+- Nhận dạng nhãn LCD (SYS/DIA/PUL) và xuất ra output có cấu trúc
+- Kiểm tra **ngưỡng sinh lý** (range validation)
+- CLI hỗ trợ chạy **1 ảnh** hoặc **cả thư mục**
+- Tự fallback **GPU/CPU**
 
-## Prerequisites
+## Yêu cầu
 
-- Python 3.10+
-- **Ollama** with `qwen3-vl:4b` model (for LCD mode)
+- Python **3.10+**
+- **Ollama** + model `qwen3-vl:4b` (cho chế độ LCD)
 - Tesseract OCR (fallback)
-- CUDA 12.x (optional, falls back to CPU)
+- CUDA 12.x (tuỳ chọn, sẽ tự fallback CPU nếu không có)
 
-### Install Ollama + Qwen3-VL
+### Cài Ollama + Qwen3-VL
 
 ```bash
 # Install Ollama
@@ -83,13 +81,13 @@ ollama pull qwen3-vl:4b
 curl http://localhost:11434/api/tags
 ```
 
-### Install Python dependencies
+### Cài dependencies Python
 
 ```bash
 pip install vietocr easyocr opencv-python-headless pillow torch torchvision pytesseract requests
 ```
 
-## Supported Vital Signs
+## Các trường dấu hiệu sinh tồn hỗ trợ
 
 | Field | Key | Type | Example |
 |-------|-----|------|---------|
@@ -101,24 +99,24 @@ pip install vietocr easyocr opencv-python-headless pillow torch torchvision pyte
 | Height | `chieu_cao` | integer | 160 |
 | SpO2 | `spo2` | integer | 98 |
 
-## Usage
+## Cách dùng
 
-### Single image
+### Chạy 1 ảnh
 
 ```bash
 python main.py --input /path/to/image.jpg --output ./output/
 ```
 
-### Entire directory
+### Chạy cả thư mục
 
 ```bash
 python main.py --input /path/to/images/ --output ./output/
 ```
 
-### Specify OCR mode
+### Chỉ định chế độ OCR
 
 ```bash
-# LCD blood pressure monitor (Qwen3-VL + screen warp)
+# LCD blood pressure monitor (Qwen3-VL + screen warp fallback)
 python main.py --input bp_monitor.jpg --output ./output/ --mode lcd
 
 # Handwritten Vietnamese text (VietOCR)
@@ -128,21 +126,21 @@ python main.py --input notebook.jpg --output ./output/ --mode handwritten
 python main.py --input image.jpg --output ./output/ --mode auto
 ```
 
-### Specify GPU
+### Chỉ định GPU
 
 ```bash
 python main.py --input image.jpg --output ./output/ --device cuda:1
 ```
 
-### Verbose logging
+### Bật verbose log
 
 ```bash
 python main.py --input image.jpg --output ./output/ --verbose
 ```
 
-## Output Format
+## Định dạng output
 
-Each image produces one JSON file named `{original_filename}.json`:
+Mỗi ảnh tạo ra 1 file JSON tên `{original_filename}.json`:
 
 ```json
 {
@@ -170,7 +168,7 @@ Each image produces one JSON file named `{original_filename}.json`:
 
 ### Validation
 
-Fields outside physiological ranges are flagged:
+Các field ngoài ngưỡng sinh lý sẽ bị gắn cờ:
 
 ```json
 "validation": {
@@ -184,37 +182,36 @@ Fields outside physiological ranges are flagged:
 
 ### Missing Fields
 
-Fields not found in the image are set to `null` and listed:
+Những trường không tìm thấy sẽ được đặt `null` và liệt kê:
 
 ```json
 "missing_fields": ["nhip_tho", "can_nang"]
 ```
 
-## OCR Mode Selection
+## Chọn OCR mode
 
 | Mode | Primary Engine | Fallback | Best For |
-|------|---------------|----------|----------|
-| `lcd` | Qwen3-VL:4b (Ollama) | Screen warp + Tesseract | Blood pressure monitors, pulse oximeters, digital thermometers |
-| `handwritten` | VietOCR (Vietnamese) | — | Handwritten vital signs notebooks, medical forms |
-| `auto` | Auto-detect | — | Mixed input — detects based on contrast and region analysis |
+|------|----------------|----------|----------|
+| `lcd` | Qwen3-VL:4b (Ollama) | Screen warp + Tesseract | Máy đo huyết áp, SpO2, nhiệt kế điện tử |
+| `handwritten` | VietOCR (Vietnamese) | — | Sổ ghi dấu hiệu sinh tồn, phiếu khám, form viết tay |
+| `auto` | Auto-detect | — | Input hỗn hợp |
 
-### LCD Pipeline Detail
+### LCD pipeline detail
 
-1. **Qwen3-VL:4b** — Vision-language model reads digits directly from the original image (no preprocessing needed)
-2. **Fallback** — If Ollama is unavailable, screen warp + Tesseract multi-pass OCR
+1. **Qwen3-VL:4b** đọc chữ số trực tiếp từ ảnh gốc (không cần preprocessing)
+2. **Fallback**: nếu Ollama không chạy → screen warp + Tesseract multi-pass OCR
 
-The 4b model scores 3/3 on real product photos without any image warping. Warping actually hurts accuracy (PUL: 72→73), so the original image is sent directly.
+### Nhận dạng nhãn LCD
 
-### LCD Label Recognition
+Parser nhận dạng:
 
-For blood pressure monitors, the parser recognizes:
-- `SYS` → systolic blood pressure (`huyet_ap.tam_thu`)
-- `DIA` → diastolic blood pressure (`huyet_ap.tam_truong`)
-- `PUL` / `PUL/min` → pulse rate (`mach`)
+- `SYS` → huyết áp tâm thu (`huyet_ap.tam_thu`)
+- `DIA` → huyết áp tâm trương (`huyet_ap.tam_truong`)
+- `PUL` / `PUL/min` → mạch (`mach`)
 
-## Benchmark Results
+## Benchmark
 
-Tested on real product photo (D2-65A blood pressure monitor):
+Test trên ảnh thật (D2-65A blood pressure monitor):
 
 | Engine | SYS | DIA | PUL | Score | Time |
 |--------|-----|-----|-----|-------|------|
@@ -225,9 +222,9 @@ Tested on real product photo (D2-65A blood pressure monitor):
 | **Qwen3-VL:4b (original)** | **✓** | **✓** | **✓** | **3/3** | **7s** |
 | Qwen3-VL:4b (warped) | ✓ | ✓ | ~✓ | 2/3 | ~8s |
 
-Qwen3-VL:4b on the original image is the only engine to achieve a perfect score. Warping actually reduces accuracy.
+Nhận xét: Qwen3-VL:4b trên ảnh gốc là engine duy nhất đạt điểm tuyệt đối; warp đôi khi làm giảm độ chính xác.
 
-## Project Structure
+## Cấu trúc project
 
 ```
 ├── main.py                  # CLI entry point
@@ -244,9 +241,9 @@ Qwen3-VL:4b on the original image is the only engine to achieve a perfect score.
 └── output/                  # JSON outputs + debug images
 ```
 
-## GPU Notes
+## Ghi chú GPU
 
-- Qwen3-VL runs via Ollama (manages its own GPU/CPU allocation)
-- VietOCR attempts to load on the configured GPU (default: `cuda:0`)
-- If VRAM is insufficient, VietOCR automatically falls back to CPU
-- Use `--device cpu` to force CPU inference for VietOCR
+- Qwen3-VL chạy qua Ollama (Ollama tự quản lý GPU/CPU)
+- VietOCR cố gắng load theo GPU cấu hình (mặc định `cuda:0`)
+- Nếu thiếu VRAM, VietOCR sẽ tự fallback CPU
+- Dùng `--device cpu` để ép VietOCR chạy CPU
