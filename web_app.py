@@ -25,7 +25,7 @@ body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
     background: #f5f7fa; color: #333; min-height: 100vh; padding: 2rem;
 }
-.container { max-width: 900px; margin: 0 auto; }
+.container { max-width: 960px; margin: 0 auto; }
 h1 { text-align: center; margin-bottom: 0.5rem; color: #1a1a2e; font-size: 1.8rem; }
 .subtitle { text-align: center; color: #666; margin-bottom: 2rem; font-size: 0.95rem; }
 .tabs {
@@ -51,15 +51,18 @@ h1 { text-align: center; margin-bottom: 0.5rem; color: #1a1a2e; font-size: 1.8re
 .drop-zone p { margin-bottom: 0.5rem; font-size: 1.1rem; }
 .drop-zone small { color: #aaa; }
 .preview-container { margin-top: 1rem; text-align: center; display: none; }
-.preview-container img { max-width: 100%; max-height: 400px; border-radius: 8px; border: 1px solid #eee; }
+.preview-container img { max-width: 100%; max-height: 500px; border-radius: 8px; border: 1px solid #eee; }
 .filename { margin-top: 0.5rem; font-size: 0.85rem; color: #666; }
 .btn {
-    display: block; width: 100%; padding: 0.9rem; border: none; border-radius: 8px;
+    display: inline-block; padding: 0.9rem 1.5rem; border: none; border-radius: 8px;
     font-size: 1rem; font-weight: 600; cursor: pointer; transition: all 0.2s; margin-top: 1.5rem;
 }
+.btn-block { display: block; width: 100%; }
 .btn-primary { background: #4a90d9; color: #fff; }
 .btn-primary:hover { background: #357abd; }
 .btn-primary:disabled { background: #ccc; cursor: not-allowed; }
+.btn-secondary { background: #e8ecf0; color: #333; margin-left: 0.5rem; }
+.btn-secondary:hover { background: #d1d5db; }
 .spinner { display: none; text-align: center; padding: 2rem; }
 .spinner::after {
     content: ''; display: inline-block; width: 40px; height: 40px;
@@ -68,22 +71,39 @@ h1 { text-align: center; margin-bottom: 0.5rem; color: #1a1a2e; font-size: 1.8re
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 .result-section { display: none; }
-.result-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
-.result-header h2 { font-size: 1.2rem; color: #1a1a2e; }
-.vitals-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
-.vital-card { background: #f8fafc; border-radius: 8px; padding: 1rem; text-align: center; border: 1px solid #e8ecf0; }
-.vital-card.out-of-range { border-color: #fca5a5; background: #fef2f2; }
-.vital-card .label-vn { font-size: 0.85rem; font-weight: 600; color: #1a1a2e; margin-bottom: 0.2rem; }
-.vital-card .label-en { font-size: 0.7rem; color: #888; margin-bottom: 0.3rem; }
-.vital-card .value { font-size: 1.5rem; font-weight: 700; color: #1a1a2e; }
+.summary-bar {
+    display: flex; gap: 1rem; flex-wrap: wrap; align-items: center;
+    padding: 0.8rem 1.2rem; background: #f0f4f8; border-radius: 8px; margin-bottom: 1.2rem;
+    font-size: 0.85rem; color: #555;
+}
+.summary-bar .stat { display: flex; align-items: center; gap: 0.3rem; }
+.summary-bar .stat strong { color: #1a1a2e; }
+.vitals-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+.vital-card {
+    border-radius: 10px; padding: 1.1rem; text-align: center; border: 1.5px solid #e8ecf0;
+    transition: all 0.2s;
+}
+.vital-card.normal { background: #f0fdf4; border-color: #86efac; }
+.vital-card.out-of-range { background: #fef2f2; border-color: #fca5a5; }
+.vital-card.missing { background: #f9fafb; border-color: #e5e7eb; opacity: 0.7; }
+.vital-card .label-vn { font-size: 0.85rem; font-weight: 600; color: #1a1a2e; margin-bottom: 0.15rem; }
+.vital-card .label-en { font-size: 0.7rem; color: #888; margin-bottom: 0.4rem; }
+.vital-card .value { font-size: 1.6rem; font-weight: 700; color: #1a1a2e; }
 .vital-card .value.null { color: #ccc; font-size: 1rem; }
 .vital-card .value.out-of-range { color: #dc2626; }
-.vital-card .unit { font-size: 0.7rem; color: #888; margin-top: 0.2rem; }
-.vital-card .range { font-size: 0.65rem; color: #aaa; margin-top: 0.1rem; }
+.vital-card .value.normal { color: #16a34a; }
+.vital-card .unit { font-size: 0.75rem; color: #888; margin-top: 0.2rem; }
+.vital-card .range { font-size: 0.65rem; color: #aaa; margin-top: 0.15rem; }
+.alert-box {
+    display: none; border-radius: 8px; padding: 1rem 1.2rem; margin-bottom: 1.2rem;
+    font-size: 0.9rem; line-height: 1.6;
+}
+.alert-box.alert-danger { background: #fef2f2; border: 1px solid #fecaca; color: #dc2626; }
 .json-output {
     background: #1e1e2e; color: #cdd6f4; border-radius: 8px; padding: 1.5rem;
     overflow-x: auto; font-family: 'JetBrains Mono', 'Fira Code', monospace;
-    font-size: 0.85rem; line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+    font-size: 0.82rem; line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+    max-height: 400px; overflow-y: auto;
 }
 .json-output .key { color: #89b4fa; }
 .json-output .string { color: #a6e3a1; }
@@ -97,7 +117,8 @@ h1 { text-align: center; margin-bottom: 0.5rem; color: #1a1a2e; font-size: 1.8re
 .raw-text-output {
     background: #1e1e2e; color: #a6e3a1; border-radius: 8px; padding: 1.5rem;
     font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 0.9rem;
-    line-height: 1.6; white-space: pre-wrap; word-break: break-word; min-height: 100px;
+    line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+    min-height: 100px; max-height: 500px; overflow-y: auto;
 }
 .mode-select {
     margin-top: 1rem; display: flex; gap: 0.5rem; align-items: center;
@@ -111,13 +132,14 @@ h1 { text-align: center; margin-bottom: 0.5rem; color: #1a1a2e; font-size: 1.8re
     display: inline-block; background: #e8ecf0; border-radius: 4px;
     padding: 0.2rem 0.6rem; font-size: 0.75rem; color: #555; margin-top: 0.5rem;
 }
+.btn-row { display: flex; gap: 0.5rem; margin-top: 1.5rem; }
 input[type="file"] { display: none; }
 </style>
 </head>
 <body>
 <div class="container">
     <h1>OCR Vital Signs</h1>
-    <p class="subtitle">Upload a blood pressure monitor image to extract vital signs</p>
+    <p class="subtitle">Upload a medical image to extract vital signs using AI</p>
 
     <div class="tabs">
         <div class="tab active" data-tab="process">Process</div>
@@ -136,14 +158,22 @@ input[type="file"] { display: none; }
                 <img id="previewImg1" alt="Preview">
                 <p class="filename" id="fileName1"></p>
             </div>
-            <button class="btn btn-primary" id="processBtn" disabled>Process</button>
+            <button class="btn btn-primary btn-block" id="processBtn" disabled>Process Image</button>
         </div>
         <div class="spinner" id="spinner1"></div>
         <div class="error-box" id="errorBox1"></div>
         <div class="card result-section" id="resultSection1">
-            <div class="result-header"><h2>Extracted Vitals</h2></div>
+            <div class="summary-bar" id="summaryBar">
+                <div class="stat"><strong id="fieldsFound">0/7</strong> fields found</div>
+                <div class="stat">Engine: <strong id="engineName">-</strong></div>
+                <div class="stat">Time: <strong id="processTime">-</strong></div>
+            </div>
             <div class="vitals-grid" id="vitalsGrid"></div>
-            <h2 style="font-size:1rem; margin-bottom:0.8rem; color:#1a1a2e;">Raw JSON</h2>
+            <div class="alert-box alert-danger" id="validationAlert"></div>
+            <div class="btn-row">
+                <button class="btn btn-secondary" id="downloadBtn">Download JSON</button>
+            </div>
+            <h3 style="font-size:0.95rem; margin:1.2rem 0 0.8rem; color:#1a1a2e;">Raw JSON</h3>
             <div class="json-output" id="jsonOutput"></div>
         </div>
     </div>
@@ -171,17 +201,17 @@ input[type="file"] { display: none; }
                 <label style="font-weight:600; color:#555; font-size:0.9rem; display:block; margin-bottom:0.3rem;">Prompt (Qwen3-VL only):</label>
                 <textarea id="promptInput" rows="3" style="width:100%; padding:0.6rem; border:1px solid #ddd; border-radius:6px; font-size:0.85rem; font-family:inherit; resize:vertical;">What text do you see in this image? List everything you can read.</textarea>
             </div>
-            <button class="btn btn-primary" id="rawOcrBtn" disabled>Get Raw Model Output</button>
+            <button class="btn btn-primary btn-block" id="rawOcrBtn" disabled>Get Raw Model Output</button>
         </div>
         <div class="spinner" id="spinner2"></div>
         <div class="error-box" id="errorBox2"></div>
         <div class="card result-section" id="resultSection2">
-            <div class="result-header"><h2>Raw model response (unfiltered)</h2></div>
             <div style="margin-bottom:0.8rem;">
                 <span class="meta-badge" id="modelUsed"></span>
                 <span class="meta-badge" id="promptUsed"></span>
             </div>
-            <div class="raw-text-output" id="rawTextOutput" style="max-height:500px; overflow-y:auto;"></div>
+            <h3 style="font-size:0.95rem; margin-bottom:0.8rem; color:#1a1a2e;">Raw model response (unfiltered)</h3>
+            <div class="raw-text-output" id="rawTextOutput"></div>
         </div>
     </div>
 </div>
@@ -208,6 +238,7 @@ const spinner1 = document.getElementById('spinner1');
 const errorBox1 = document.getElementById('errorBox1');
 const resultSection1 = document.getElementById('resultSection1');
 let selectedFile1 = null;
+let lastResultData = null;
 
 dropZone1.addEventListener('click', () => fileInput1.click());
 dropZone1.addEventListener('dragover', (e) => { e.preventDefault(); dropZone1.classList.add('dragover'); });
@@ -241,68 +272,116 @@ processBtn.addEventListener('click', async () => {
     errorBox1.style.display = 'none';
     const formData = new FormData();
     formData.append('file', selectedFile1);
+    const startTime = performance.now();
     try {
         const resp = await fetch('/process', { method: 'POST', body: formData });
+        const elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
         const data = await resp.json();
         if (!resp.ok) { showError1(data.detail || 'Processing failed'); return; }
-        displayResult(data);
+        displayResult(data, elapsed);
     } catch (err) { showError1('Connection error: ' + err.message); }
     finally { spinner1.style.display = 'none'; processBtn.disabled = false; }
 });
 
 function showError1(msg) { errorBox1.textContent = msg; errorBox1.style.display = 'block'; }
 
-function displayResult(data) {
+function displayResult(data, elapsed) {
+    lastResultData = data;
     const vitals = data.vitals || {};
     const meta = data.fields_meta || {};
     const validation = data.validation || {};
     const bp = vitals.huyet_ap || {};
 
     const cards = [
-        { key: 'huyet_ap.tam_thu', field: 'huyet_ap', sub: 'tam_thu', value: bp.tam_thu },
-        { key: 'huyet_ap.tam_truong', field: 'huyet_ap', sub: 'tam_truong', value: bp.tam_truong },
         { key: 'mach', field: 'mach', value: vitals.mach },
         { key: 'nhiet_do', field: 'nhiet_do', value: vitals.nhiet_do },
-        { key: 'spo2', field: 'spo2', value: vitals.spo2 },
+        { key: 'huyet_ap', field: 'huyet_ap', value: bp.tam_thu != null || bp.tam_truong != null ? bp : null, isBP: true },
         { key: 'nhip_tho', field: 'nhip_tho', value: vitals.nhip_tho },
         { key: 'can_nang', field: 'can_nang', value: vitals.can_nang },
         { key: 'chieu_cao', field: 'chieu_cao', value: vitals.chieu_cao },
+        { key: 'spo2', field: 'spo2', value: vitals.spo2 },
     ];
 
+    // Count found fields
+    let foundCount = 0;
+    cards.forEach(c => { if (c.value != null) foundCount++; });
+
+    // Summary bar
+    document.getElementById('fieldsFound').textContent = foundCount + '/7';
+    document.getElementById('engineName').textContent = data.ocr_engine || '-';
+    document.getElementById('processTime').textContent = elapsed + 's';
+
+    // Vitals grid
     const vitalsGrid = document.getElementById('vitalsGrid');
     vitalsGrid.innerHTML = cards.map(c => {
         const info = meta[c.field] || {};
         const isNull = c.value == null;
         const isOutOfRange = validation[c.key] && validation[c.key].out_of_range;
-        let labelVn = info.label_vn || c.field;
-        let labelEn = info.label_en || '';
+        const cardClass = isNull ? 'missing' : (isOutOfRange ? 'out-of-range' : 'normal');
+        const valueClass = isNull ? 'null' : (isOutOfRange ? 'out-of-range' : 'normal');
+
+        let displayValue = '';
         let unit = info.unit || '';
         let normalRange = '';
 
-        if (c.sub) {
-            labelVn = c.sub === 'tam_thu' ? 'SYS (Tâm thu)' : 'DIA (Tâm trương)';
-            labelEn = c.sub === 'tam_thu' ? 'Systolic' : 'Diastolic';
+        if (c.isBP) {
+            if (!isNull) {
+                displayValue = (bp.tam_thu || '-') + '/' + (bp.tam_truong || '-');
+            }
             unit = 'mmHg';
             const nr = info.normal_range;
-            if (nr && nr[c.sub]) normalRange = nr[c.sub][0] + '-' + nr[c.sub][1];
+            if (nr && nr.tam_thu) normalRange = nr.tam_thu[0] + '-' + nr.tam_thu[1] + ' / ' + nr.tam_truong[0] + '-' + nr.tam_truong[1];
         } else {
+            displayValue = isNull ? '' : c.value;
             const nr = info.normal_range;
-            if (nr && !nr.tam_thu) normalRange = nr[0] + '-' + nr[1];
+            if (nr && Array.isArray(nr)) normalRange = nr[0] + '-' + nr[1];
         }
 
-        return '<div class="vital-card ' + (isOutOfRange ? 'out-of-range' : '') + '">' +
-            '<div class="label-vn">' + labelVn + '</div>' +
-            '<div class="label-en">' + labelEn + '</div>' +
-            '<div class="value ' + (isNull ? 'null' : '') + (isOutOfRange ? ' out-of-range' : '') + '">' +
-            (isNull ? '—' : c.value) + '</div>' +
+        return '<div class="vital-card ' + cardClass + '">' +
+            '<div class="label-vn">' + (info.label_vn || c.field) + '</div>' +
+            '<div class="label-en">' + (info.label_en || '') + '</div>' +
+            '<div class="value ' + valueClass + '">' + (isNull ? '—' : displayValue) + '</div>' +
             '<div class="unit">' + unit + '</div>' +
             (normalRange ? '<div class="range">Normal: ' + normalRange + '</div>' : '') +
             '</div>';
     }).join('');
 
+    // Validation alerts
+    const alertBox = document.getElementById('validationAlert');
+    const valKeys = Object.keys(validation);
+    if (valKeys.length > 0) {
+        let alertHtml = '';
+        valKeys.forEach(k => {
+            const v = validation[k];
+            const fieldMeta = meta[k] || {};
+            const label = fieldMeta.label_vn || k;
+            const unit = fieldMeta.unit || '';
+            alertHtml += '⚠️ ' + label + ': ' + v.value + unit + ' — ngoài ngưỡng bình thường (' + v.expected + unit + ')<br>';
+        });
+        alertBox.innerHTML = alertHtml;
+        alertBox.style.display = 'block';
+    } else {
+        alertBox.style.display = 'none';
+    }
+
+    // JSON output
     document.getElementById('jsonOutput').innerHTML = syntaxHighlight(JSON.stringify(data, null, 2));
     resultSection1.style.display = 'block';
 }
+
+// Download JSON
+document.getElementById('downloadBtn').addEventListener('click', () => {
+    if (!lastResultData) return;
+    const blob = new Blob([JSON.stringify(lastResultData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = (lastResultData.source_image || 'result').replace(/\.[^.]+$/, '') + '.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+});
 
 // === TAB 2: Raw OCR Test ===
 const dropZone2 = document.getElementById('dropZone2');
