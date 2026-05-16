@@ -19,22 +19,17 @@ Extract vital signs from medical images (blood pressure monitor displays and han
            │                                  │
            ▼                                  ▼
 ┌─────────────────────────┐    ┌──────────────────────────────┐
-│  Screen Detector         │    │  VietOCR (vgg_transformer)    │
-│  (OpenCV edge/contour    │    │  Vietnamese handwritten text  │
-│   → perspective warp)    │    └──────────────────────────────┘
-└──────────┬──────────────┘
-           │
-           ▼
-┌─────────────────────────┐
-│  Qwen3-VL:2b (Ollama)   │ ◄── Primary LCD engine
-│  Vision-language model   │
+│  Qwen3-VL:4b (Ollama)   │    │  VietOCR (vgg_transformer)    │
+│  Vision-language model   │    │  Vietnamese handwritten text  │
+│  Original image direct   │    └──────────────────────────────┘
 │  localhost:11434         │
 └──────────┬──────────────┘
            │ (fallback if Ollama unavailable)
            ▼
 ┌─────────────────────────┐
-│  Tesseract OCR           │ ◄── Fallback LCD engine
-│  Multi-pass threshold    │
+│  Screen Warp + Tesseract │ ◄── Fallback only
+│  Perspective correction  │
+│  + multi-pass OCR        │
 └──────────┬──────────────┘
            │
            ▼
@@ -58,9 +53,8 @@ Extract vital signs from medical images (blood pressure monitor displays and han
 ## Features
 
 - **LCD OCR pipeline:**
-  - Screen detection + perspective warp (OpenCV)
-  - **Qwen3-VL:2b** via Ollama — vision-language model that reads LCD digits directly
-  - Fallback to Tesseract if Ollama is unavailable
+  - **Qwen3-VL:4b** via Ollama — vision-language model reads LCD digits directly from the original image (no warp needed)
+  - Fallback to screen warp + Tesseract if Ollama is unavailable
 - **Handwritten OCR:** VietOCR (`vgg_transformer`) for Vietnamese handwritten text
 - Auto-detection of image type (LCD vs handwritten)
 - Regex-based parser for 7 vital sign fields
@@ -72,7 +66,7 @@ Extract vital signs from medical images (blood pressure monitor displays and han
 ## Prerequisites
 
 - Python 3.10+
-- **Ollama** with `qwen3-vl:2b` model (for LCD mode)
+- **Ollama** with `qwen3-vl:4b` model (for LCD mode)
 - Tesseract OCR (fallback)
 - CUDA 12.x (optional, falls back to CPU)
 
@@ -83,7 +77,7 @@ Extract vital signs from medical images (blood pressure monitor displays and han
 curl -fsSL https://ollama.com/install.sh | sh
 
 # Pull the vision-language model
-ollama pull qwen3-vl:2b
+ollama pull qwen3-vl:4b
 
 # Verify it's running
 curl http://localhost:11434/api/tags
@@ -200,16 +194,16 @@ Fields not found in the image are set to `null` and listed:
 
 | Mode | Primary Engine | Fallback | Best For |
 |------|---------------|----------|----------|
-| `lcd` | Qwen3-VL:2b (Ollama) | Tesseract | Blood pressure monitors, pulse oximeters, digital thermometers |
+| `lcd` | Qwen3-VL:4b (Ollama) | Screen warp + Tesseract | Blood pressure monitors, pulse oximeters, digital thermometers |
 | `handwritten` | VietOCR (Vietnamese) | — | Handwritten vital signs notebooks, medical forms |
 | `auto` | Auto-detect | — | Mixed input — detects based on contrast and region analysis |
 
 ### LCD Pipeline Detail
 
-1. **Screen Detection** — OpenCV edge detection + contour analysis finds the LCD rectangle
-2. **Perspective Warp** — Corrects viewing angle to get a flat front-on view
-3. **Qwen3-VL:2b** — Vision-language model reads digits directly from the warped image
-4. **Fallback** — If Ollama is unavailable, Tesseract runs multi-pass OCR on the warped image
+1. **Qwen3-VL:4b** — Vision-language model reads digits directly from the original image (no preprocessing needed)
+2. **Fallback** — If Ollama is unavailable, screen warp + Tesseract multi-pass OCR
+
+The 4b model scores 3/3 on real product photos without any image warping. Warping actually hurts accuracy (PUL: 72→73), so the original image is sent directly.
 
 ### LCD Label Recognition
 
@@ -222,15 +216,16 @@ For blood pressure monitors, the parser recognizes:
 
 Tested on real product photo (D2-65A blood pressure monitor):
 
-| Engine | SYS | DIA | PUL | Score |
-|--------|-----|-----|-----|-------|
-| Tesseract (all modes) | ✗ | ✗ | ✗ | 0/3 |
-| EasyOCR | ✗ | ✗ | ✗ | 0/3 |
-| TrOCR | ✗ | ✗ | ✗ | 0/3 |
-| **Qwen3-VL:2b (original)** | ✓ | — | — | 1/3 |
-| **Qwen3-VL:2b (warped)** | ✓ | ✓ | ~✓ | 2/3 |
+| Engine | SYS | DIA | PUL | Score | Time |
+|--------|-----|-----|-----|-------|------|
+| Tesseract (all modes) | ✗ | ✗ | ✗ | 0/3 | ~2s |
+| EasyOCR | ✗ | ✗ | ✗ | 0/3 | ~4s |
+| Qwen3-VL:2b (original) | ✓ | ✗ | ✗ | 1/3 | ~5s |
+| Qwen3-VL:2b (warped) | ✓ | ✓ | ~✓ | 2/3 | ~1s |
+| **Qwen3-VL:4b (original)** | **✓** | **✓** | **✓** | **3/3** | **7s** |
+| Qwen3-VL:4b (warped) | ✓ | ✓ | ~✓ | 2/3 | ~8s |
 
-Qwen3-VL is the only engine capable of reading real-world LCD displays with low contrast.
+Qwen3-VL:4b on the original image is the only engine to achieve a perfect score. Warping actually reduces accuracy.
 
 ## Project Structure
 

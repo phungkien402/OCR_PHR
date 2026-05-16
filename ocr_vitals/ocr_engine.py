@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 # Ollama configuration
 OLLAMA_ENDPOINT = "http://localhost:11434/api/chat"
-OLLAMA_MODEL = "qwen3-vl:2b"
+OLLAMA_MODEL = "qwen3-vl:4b"
 
 _vietocr_predictor = None
 
@@ -157,10 +157,10 @@ def extract_text(image: np.ndarray, device: str = "cuda:0", mode: str = "auto",
 def _extract_text_lcd(image: np.ndarray, image_path: str = None) -> str:
     """Extract text from LCD display using Qwen3-VL via Ollama.
 
-    Pipeline:
-      1. Run screen_detector to get warped (perspective-corrected) image
-      2. Send warped image to Qwen3-VL:2b via Ollama
-      3. Fallback to Tesseract if Ollama is unavailable
+    Sends the original image directly to Qwen3-VL:4b without warping.
+    The 4b model performs better on original images than warped ones.
+
+    Fallback: Tesseract with screen warp if Ollama is unavailable.
 
     Args:
         image: Image as numpy array (grayscale or BGR).
@@ -169,21 +169,29 @@ def _extract_text_lcd(image: np.ndarray, image_path: str = None) -> str:
     Returns:
         Extracted text string.
     """
-    import sys
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from screen_detector import detect_screen, warp_screen
-
-    # Step 1: Detect and warp the LCD screen
+    # Ensure BGR format for encoding
     if len(image.shape) == 2:
         bgr_image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
     else:
         bgr_image = image
 
-    warped = None
+    # Primary: Send original image directly to Qwen3-VL:4b
+    text = _extract_text_qwen3_vl(bgr_image)
+    if text:
+        logger.info("Qwen3-VL extraction successful")
+        return text
+
+    # Fallback: Screen warp + Tesseract if Ollama unavailable
+    logger.warning("Qwen3-VL unavailable, falling back to screen warp + Tesseract")
+
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from screen_detector import detect_screen, warp_screen
+
     corners = detect_screen(bgr_image)
     if corners is not None:
         warped = warp_screen(bgr_image, corners)
-        logger.info("LCD screen detected and warped successfully")
+        logger.info("Fallback: LCD screen warped for Tesseract")
 
         # Save debug warped image
         if image_path:
@@ -191,20 +199,11 @@ def _extract_text_lcd(image: np.ndarray, image_path: str = None) -> str:
             filename = os.path.basename(image_path)
             debug_path = f"output/debug_warped_{filename}"
             cv2.imwrite(debug_path, warped)
-            logger.info("Debug warped image saved: %s", debug_path)
+
+        return _extract_text_tesseract(warped)
     else:
-        logger.warning("Screen detection failed, using original image for OCR")
-        warped = bgr_image
-
-    # Step 2: Try Qwen3-VL via Ollama
-    text = _extract_text_qwen3_vl(warped)
-    if text:
-        logger.info("Qwen3-VL extraction successful")
-        return text
-
-    # Step 3: Fallback to Tesseract on warped image
-    logger.warning("Qwen3-VL unavailable, falling back to Tesseract")
-    return _extract_text_tesseract(warped)
+        logger.warning("Screen detection also failed, using Tesseract on original")
+        return _extract_text_tesseract(bgr_image)
 
 
 def _extract_text_qwen3_vl(image: np.ndarray) -> str:
@@ -233,9 +232,12 @@ def _extract_text_qwen3_vl(image: np.ndarray) -> str:
     img_b64 = base64.b64encode(img_encoded.tobytes()).decode()
 
     prompt = (
-        "This is a blood pressure monitor display. "
-        "Read the numbers next to SYS, DIA, and PUL labels. "
-        "Reply ONLY in this format:\n"
+        "This is a blood pressure monitor. Look carefully at the LCD display. "
+        "Read EXACTLY the numbers shown next to each label. "
+        "SYS = systolic pressure (top number, usually 3 digits) "
+        "DIA = diastolic pressure (middle number, usually 2 digits) "
+        "PUL = pulse rate (bottom number, usually 2 digits) "
+        "Reply ONLY in this exact format:\n"
         "SYS: <number>\n"
         "DIA: <number>\n"
         "PUL: <number>"
