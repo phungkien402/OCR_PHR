@@ -4,8 +4,16 @@ Ground truth for test image may-do-huyet-ap-bap-tay-d2group-kf-65a.png:
   SYS = 128
   DIA = 78
   PUL = 72
+
+Runs on both a real product photo and a synthetic LCD image.
 """
 
+import os
+# Set NCCL env vars early (before torch/easyocr import) to avoid CUDA comm errors
+os.environ["NCCL_P2P_DISABLE"] = "1"
+os.environ["NCCL_SHM_DISABLE"] = "1"
+
+import math
 import re
 import sys
 import time
@@ -16,10 +24,12 @@ import numpy as np
 # Ground truth
 GROUND_TRUTH = {"SYS": 128, "DIA": 78, "PUL": 72}
 IMAGE_PATH = "test_images/may-do-huyet-ap-bap-tay-d2group-kf-65a.png"
-IMAGE_PATH_SYNTHETIC = "test_images/bp_monitor_lcd.png"
+IMAGE_PATH_SYNTHETIC = "test_images/synthetic_lcd.png"
 
 # Results storage
 results = []
+# Current image path (set per run)
+CURRENT_IMAGE = IMAGE_PATH
 
 
 def score_output(raw_text: str) -> dict:
@@ -172,7 +182,7 @@ def engine_tesseract_default():
     import pytesseract
     pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 
-    img = cv2.imread(IMAGE_PATH)
+    img = cv2.imread(CURRENT_IMAGE)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
     best_text = ""
@@ -207,7 +217,7 @@ def engine_tesseract_digits():
     import pytesseract
     pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 
-    img = cv2.imread(IMAGE_PATH)
+    img = cv2.imread(CURRENT_IMAGE)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
     config = "--psm 11 --oem 3 -c tessedit_char_whitelist=0123456789"
@@ -257,7 +267,7 @@ def engine_paddleocr():
     from paddleocr import PaddleOCR
 
     ocr = PaddleOCR(lang="en")
-    result = list(ocr.predict(IMAGE_PATH))
+    result = list(ocr.predict(CURRENT_IMAGE))
 
     lines = []
     if result:
@@ -285,18 +295,151 @@ def engine_paddleocr():
 def engine_easyocr():
     import os
     os.environ["NCCL_P2P_DISABLE"] = "1"
+    os.environ["NCCL_SHM_DISABLE"] = "1"
     import easyocr
 
-    reader = easyocr.Reader(["en"], gpu=True)
-    img = cv2.imread(IMAGE_PATH)
+    try:
+        reader = easyocr.Reader(["en"], gpu=True)
+        img = cv2.imread(CURRENT_IMAGE)
+        results_ocr = reader.readtext(img, detail=1, text_threshold=0.3, low_text=0.3)
+    except RuntimeError:
+        # Fallback to CPU if NCCL still fails
+        reader = easyocr.Reader(["en"], gpu=False)
+        img = cv2.imread(CURRENT_IMAGE)
+        results_ocr = reader.readtext(img, detail=1, text_threshold=0.3, low_text=0.3)
 
-    results_ocr = reader.readtext(img, detail=1, text_threshold=0.3, low_text=0.3)
+    # Use spatial/bbox coordinates for label-value association
+    extracted = _easyocr_spatial_parse(results_ocr)
 
+    # Build output text that score_output can parse
     lines = []
+    if extracted["SYS"] is not None:
+        lines.append(f"SYS {extracted['SYS']}")
+    if extracted["DIA"] is not None:
+        lines.append(f"DIA {extracted['DIA']}")
+    if extracted["PUL"] is not None:
+        lines.append(f"PUL {extracted['PUL']}")
+
+    # Print raw detections to console for debugging (not in returned text)
+    print("  Spatial parse result:", extracted)
+    print("  Raw detections:")
     for bbox, text, conf in sorted(results_ocr, key=lambda r: r[0][0][1]):
-        lines.append(f"{text} ({conf:.2f})")
+        cx = (bbox[0][0] + bbox[2][0]) / 2
+        cy = (bbox[0][1] + bbox[2][1]) / 2
+        print(f"    pos=({cx:.0f},{cy:.0f}) text=\"{text}\" conf={conf:.2f}")
 
     return "\n".join(lines)
+
+
+def _easyocr_spatial_parse(detections: list) -> dict:
+    """Parse EasyOCR detections using spatial (bbox) coordinates.
+
+    For each label (SYS, DIA, PUL), find the nearest number to its RIGHT or BELOW.
+    Uses center coordinates of each bounding box.
+
+    Args:
+        detections: List of (bbox, text, confidence) from EasyOCR.
+
+    Returns:
+        Dict with SYS, DIA, PUL values (int or None).
+    """
+    extracted = {"SYS": None, "DIA": None, "PUL": None}
+
+    if not detections:
+        return extracted
+
+    # Build list of (center_x, center_y, text, bbox_height) for each detection
+    items = []
+    for bbox, text, conf in detections:
+        # bbox: [[x1,y1],[x2,y1],[x2,y2],[x1,y2]]
+        cx = (bbox[0][0] + bbox[2][0]) / 2
+        cy = (bbox[0][1] + bbox[2][1]) / 2
+        h = abs(bbox[2][1] - bbox[0][1])
+        items.append({"cx": cx, "cy": cy, "text": text.strip(), "h": h, "conf": conf})
+
+    # Separate labels and numbers
+    labels = []  # (cx, cy, label_name)
+    numbers = []  # (cx, cy, value)
+
+    # Words/patterns to skip when looking for numbers
+    skip_patterns = re.compile(
+        r"(mmhg|kpa|bpm|pul/?min|pulse/?min|/min|d2[-]?\d+[a-z]?|[a-z]\d+[-]\d*[a-z]?)",
+        re.IGNORECASE,
+    )
+
+    for item in items:
+        text_lower = item["text"].lower().strip()
+        # Check if this is a label (confidence > 0.3 for labels)
+        if item["conf"] < 0.3:
+            continue
+        if "sys" in text_lower and len(text_lower) <= 10:
+            labels.append({"cx": item["cx"], "cy": item["cy"], "label": "SYS", "h": item["h"]})
+        elif "dia" in text_lower and len(text_lower) <= 10:
+            labels.append({"cx": item["cx"], "cy": item["cy"], "label": "DIA", "h": item["h"]})
+        elif "pul" in text_lower and "min" not in text_lower and len(text_lower) <= 10:
+            labels.append({"cx": item["cx"], "cy": item["cy"], "label": "PUL", "h": item["h"]})
+
+        # Check if this is a number (2-3 digits, plausible BP value)
+        # Require confidence > 0.4 for number detections
+        if item["conf"] < 0.4:
+            continue
+        # Skip items that are units, model numbers, or other non-digit text
+        if skip_patterns.search(item["text"]):
+            continue
+        # Only consider items that are purely numeric or mostly numeric
+        clean_text = re.sub(r"[^0-9]", "", item["text"])
+        if not clean_text:
+            continue
+        # The text should be mostly digits (>50% of non-space chars)
+        non_space = re.sub(r"\s", "", item["text"])
+        if len(clean_text) / max(len(non_space), 1) < 0.5:
+            continue
+
+        digits = re.findall(r"\d{2,3}", item["text"])
+        for d in digits:
+            val = int(d)
+            if 30 <= val <= 250:
+                numbers.append({"cx": item["cx"], "cy": item["cy"], "value": val})
+
+    # For each label, find the nearest number to its RIGHT or BELOW
+    for label_item in labels:
+        label_name = label_item["label"]
+        if extracted[label_name] is not None:
+            continue
+
+        best_val = None
+        best_score = float("inf")
+
+        for num_item in numbers:
+            dx = num_item["cx"] - label_item["cx"]
+            dy = num_item["cy"] - label_item["cy"]
+
+            # Only consider numbers to the RIGHT or BELOW the label
+            # Right: dx > 0, dy within tolerance (same row)
+            # Below: dy > 0, dx within tolerance (same column)
+            row_tolerance = label_item["h"] * 1.5  # within 1.5x label height vertically
+            col_tolerance = label_item["h"] * 3  # within 3x label height horizontally
+
+            score = None
+
+            # Same row (to the right)
+            if dx > 0 and abs(dy) < row_tolerance:
+                score = math.sqrt(dx**2 + dy**2)
+                # Prefer same-row matches
+                score *= 0.5
+
+            # Below (within column tolerance)
+            elif dy > 0 and abs(dx) < col_tolerance:
+                score = math.sqrt(dx**2 + dy**2)
+
+            if score is not None and score < best_score:
+                best_score = score
+                best_val = num_item["value"]
+
+        if best_val is not None:
+            extracted[label_name] = best_val
+
+    return extracted
 
 
 # ============================================================
@@ -314,7 +457,7 @@ def engine_trocr():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = model.to(device)
 
-    img = Image.open(IMAGE_PATH).convert("RGB")
+    img = Image.open(CURRENT_IMAGE).convert("RGB")
 
     # Full image
     pixel_values = processor(images=img, return_tensors="pt").pixel_values.to(device)
@@ -323,7 +466,7 @@ def engine_trocr():
     print(f"  Full image: {repr(full_text)}")
 
     # Crop digit regions using contours
-    img_cv = cv2.imread(IMAGE_PATH)
+    img_cv = cv2.imread(CURRENT_IMAGE)
     gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
     _, binary = cv2.threshold(gray, 50, 255, cv2.THRESH_BINARY)
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -364,7 +507,7 @@ def engine_surya():
     from surya.model.recognition.processor import load_processor as load_rec_processor
     from PIL import Image
 
-    img = Image.open(IMAGE_PATH)
+    img = Image.open(CURRENT_IMAGE)
 
     det_model = load_det_model()
     det_processor = load_det_processor()
@@ -391,7 +534,7 @@ def engine_contour_tesseract():
     import pytesseract
     pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 
-    img = cv2.imread(IMAGE_PATH)
+    img = cv2.imread(CURRENT_IMAGE)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
     # Try multiple threshold levels to find digit contours
@@ -475,7 +618,7 @@ def engine_contour_tesseract():
 def engine_screen_detect_warp():
     from screen_detector import detect_and_ocr
 
-    text = detect_and_ocr(IMAGE_PATH, debug_output=True)
+    text = detect_and_ocr(CURRENT_IMAGE, debug_output=True)
     return text
 
 
@@ -483,12 +626,12 @@ def engine_screen_detect_warp():
 # MAIN
 # ============================================================
 
-def print_summary():
+def print_summary(image_name: str):
     """Print final summary table."""
     print(f"\n\n{'='*80}")
     print("BENCHMARK SUMMARY")
     print(f"{'='*80}")
-    print(f"Image: {IMAGE_PATH}")
+    print(f"Image: {image_name}")
     print(f"Ground truth: SYS={GROUND_TRUTH['SYS']}, DIA={GROUND_TRUTH['DIA']}, PUL={GROUND_TRUTH['PUL']}")
     print(f"{'='*80}")
     print(f"{'Engine':<35} | {'SYS':>5} | {'DIA':>5} | {'PUL':>5} | {'Score':>5} | {'Time':>7} | Error")
@@ -510,54 +653,53 @@ def print_summary():
 
     print(f"{'='*80}")
 
-    # Save to file
+
+def save_results(all_results: dict):
+    """Save results for all images to file."""
     with open("benchmark_results.txt", "w") as f:
-        f.write(f"OCR LCD Benchmark Results\n")
-        f.write(f"Image: {IMAGE_PATH}\n")
-        f.write(f"Ground truth: SYS={GROUND_TRUTH['SYS']}, DIA={GROUND_TRUTH['DIA']}, PUL={GROUND_TRUTH['PUL']}\n")
-        f.write(f"{'='*80}\n")
-        f.write(f"{'Engine':<35} | {'SYS':>5} | {'DIA':>5} | {'PUL':>5} | {'Score':>5} | {'Time':>7} | Error\n")
-        f.write(f"{'-'*35}-+-{'-'*5}-+-{'-'*5}-+-{'-'*5}-+-{'-'*5}-+-{'-'*7}-+------\n")
+        for image_name, image_results in all_results.items():
+            f.write(f"OCR LCD Benchmark Results\n")
+            f.write(f"Image: {image_name}\n")
+            f.write(f"Ground truth: SYS={GROUND_TRUTH['SYS']}, DIA={GROUND_TRUTH['DIA']}, PUL={GROUND_TRUTH['PUL']}\n")
+            f.write(f"{'='*80}\n")
+            f.write(f"{'Engine':<35} | {'SYS':>5} | {'DIA':>5} | {'PUL':>5} | {'Score':>5} | {'Time':>7} | Error\n")
+            f.write(f"{'-'*35}-+-{'-'*5}-+-{'-'*5}-+-{'-'*5}-+-{'-'*5}-+-{'-'*7}-+------\n")
 
-        for r in results:
-            sys_val = str(r["sys"]) if r["sys"] is not None else "-"
-            dia_val = str(r["dia"]) if r["dia"] is not None else "-"
-            pul_val = str(r["pul"]) if r["pul"] is not None else "-"
-            err = r["error"][:30] if r["error"] else ""
-            f.write(f"{r['engine']:<35} | {sys_val:>5} | {dia_val:>5} | {pul_val:>5} | "
-                    f"{r['score']:>5} | {r['time']:>6.2f}s | {err}\n")
+            for r in image_results:
+                sys_val = str(r["sys"]) if r["sys"] is not None else "-"
+                dia_val = str(r["dia"]) if r["dia"] is not None else "-"
+                pul_val = str(r["pul"]) if r["pul"] is not None else "-"
+                err = r["error"][:30] if r["error"] else ""
+                f.write(f"{r['engine']:<35} | {sys_val:>5} | {dia_val:>5} | {pul_val:>5} | "
+                        f"{r['score']:>5} | {r['time']:>6.2f}s | {err}\n")
 
-        f.write(f"{'='*80}\n\n")
+            f.write(f"{'='*80}\n\n")
 
-        # Raw outputs
-        f.write("\nDETAILED RAW OUTPUTS\n")
-        f.write(f"{'='*80}\n")
-        for r in results:
-            f.write(f"\n--- {r['engine']} ---\n")
-            f.write(f"Raw: {r['raw']}\n")
-            if r["error"]:
-                f.write(f"Error: {r['error']}\n")
+            # Raw outputs
+            f.write("DETAILED RAW OUTPUTS\n")
+            f.write(f"{'='*80}\n")
+            for r in image_results:
+                f.write(f"\n--- {r['engine']} ---\n")
+                f.write(f"Raw: {r['raw']}\n")
+                if r["error"]:
+                    f.write(f"Error: {r['error']}\n")
+            f.write(f"\n\n{'#'*80}\n\n")
 
     print(f"\nResults saved to benchmark_results.txt")
 
 
-if __name__ == "__main__":
-    print(f"OCR LCD Benchmark")
-    print(f"Image: {IMAGE_PATH}")
-    print(f"Ground truth: SYS={GROUND_TRUTH['SYS']}, DIA={GROUND_TRUTH['DIA']}, PUL={GROUND_TRUTH['PUL']}")
+def run_all_engines():
+    """Run all engines on the current image."""
+    global results
+    results = []
 
-    # Verify image exists
-    img = cv2.imread(IMAGE_PATH)
-    if img is None:
-        print(f"ERROR: Cannot read image: {IMAGE_PATH}")
-        sys.exit(1)
-    print(f"Image loaded: {img.shape}")
-
-    # Run engines
+    # Engine 1: Tesseract default
     run_engine("1. Tesseract default (PSM 6/11/3)", engine_tesseract_default)
+
+    # Engine 2: Tesseract digit whitelist
     run_engine("2. Tesseract digit whitelist", engine_tesseract_digits)
 
-    # Engine 3: PaddleOCR (may need install)
+    # Engine 3: PaddleOCR
     try:
         from paddleocr import PaddleOCR
         run_engine("3. PaddleOCR", engine_paddleocr)
@@ -572,11 +714,11 @@ if __name__ == "__main__":
     # Engine 4: EasyOCR
     try:
         import easyocr
-        run_engine("4. EasyOCR", engine_easyocr)
+        run_engine("4. EasyOCR (spatial)", engine_easyocr)
     except ImportError:
         print("\n[SKIP] EasyOCR not installed.")
         results.append({
-            "engine": "4. EasyOCR",
+            "engine": "4. EasyOCR (spatial)",
             "raw": "", "sys": None, "dia": None, "pul": None,
             "score": 0, "time": 0, "error": "not installed",
         })
@@ -586,8 +728,7 @@ if __name__ == "__main__":
         from transformers import TrOCRProcessor
         run_engine("5. TrOCR (printed)", engine_trocr)
     except ImportError:
-        print("\n[SKIP] TrOCR not installed. Install with:")
-        print("  pip install transformers")
+        print("\n[SKIP] TrOCR not installed.")
         results.append({
             "engine": "5. TrOCR (printed)",
             "raw": "", "sys": None, "dia": None, "pul": None,
@@ -599,8 +740,7 @@ if __name__ == "__main__":
         from surya.ocr import run_ocr
         run_engine("6. Surya OCR", engine_surya)
     except ImportError:
-        print("\n[SKIP] Surya OCR not installed. Install with:")
-        print("  pip install surya-ocr")
+        print("\n[SKIP] Surya OCR not installed.")
         results.append({
             "engine": "6. Surya OCR",
             "raw": "", "sys": None, "dia": None, "pul": None,
@@ -613,5 +753,45 @@ if __name__ == "__main__":
     # Engine 8: Screen detect + warp + Tesseract
     run_engine("8. Screen detect + warp + Tesseract", engine_screen_detect_warp)
 
-    # Print summary
-    print_summary()
+    return list(results)
+
+
+if __name__ == "__main__":
+    all_results = {}
+
+    # ---- Run on REAL product photo ----
+    print(f"\n{'#'*80}")
+    print(f"# TEST 1: Real product photo")
+    print(f"{'#'*80}")
+    CURRENT_IMAGE = IMAGE_PATH
+    print(f"Image: {CURRENT_IMAGE}")
+    print(f"Ground truth: SYS={GROUND_TRUTH['SYS']}, DIA={GROUND_TRUTH['DIA']}, PUL={GROUND_TRUTH['PUL']}")
+
+    img = cv2.imread(CURRENT_IMAGE)
+    if img is None:
+        print(f"ERROR: Cannot read image: {CURRENT_IMAGE}")
+        sys.exit(1)
+    print(f"Image loaded: {img.shape}")
+
+    all_results[IMAGE_PATH] = run_all_engines()
+    print_summary(IMAGE_PATH)
+
+    # ---- Run on SYNTHETIC LCD image ----
+    print(f"\n\n{'#'*80}")
+    print(f"# TEST 2: Synthetic LCD image")
+    print(f"{'#'*80}")
+    CURRENT_IMAGE = IMAGE_PATH_SYNTHETIC
+    print(f"Image: {CURRENT_IMAGE}")
+    print(f"Ground truth: SYS={GROUND_TRUTH['SYS']}, DIA={GROUND_TRUTH['DIA']}, PUL={GROUND_TRUTH['PUL']}")
+
+    img = cv2.imread(CURRENT_IMAGE)
+    if img is None:
+        print(f"ERROR: Cannot read image: {CURRENT_IMAGE}")
+        print("Skipping synthetic test.")
+    else:
+        print(f"Image loaded: {img.shape}")
+        all_results[IMAGE_PATH_SYNTHETIC] = run_all_engines()
+        print_summary(IMAGE_PATH_SYNTHETIC)
+
+    # Save all results
+    save_results(all_results)
