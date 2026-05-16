@@ -4,14 +4,16 @@ Ground truth: SYS=128, DIA=78, PUL=72
 ================================================================================
 Engine                              |   SYS |   DIA |   PUL | Score |    Time | Error
 ------------------------------------+-------+-------+-------+-------+---------+------
-1. Tesseract default (PSM 6/11/3)   |     - |     - |     - |     0 |   1.99s | 
-2. Tesseract digit whitelist        |     - |     - |     - |     0 |   1.13s | 
-3. PaddleOCR                        |     - |     - |     - |     0 |   4.41s | (Unimplemented) ConvertPirAttr
-4. EasyOCR (spatial)                |     - |     - |     - |     0 |   4.12s | 
-5. TrOCR (printed)                  |     - |     - |     - |     0 |  10.19s | 
+1. Tesseract default (PSM 6/11/3)   |     - |     - |     - |     0 |   1.70s | 
+2. Tesseract digit whitelist        |     - |     - |     - |     0 |   1.15s | 
+3. PaddleOCR                        |     - |     - |     - |     0 |   0.00s | No module named 'paddleocr'
+4. EasyOCR (spatial)                |     - |     - |     - |     0 |   3.93s | 
+5. TrOCR (printed)                  |     - |     - |     - |     0 |   0.00s | not installed
 6. Surya OCR                        |     - |     - |     - |     0 |   0.00s | not installed
-7. OpenCV contour + Tesseract       |     - |     - |     - |     0 |   5.20s | 
-8. Screen detect + warp + Tesseract |     - |     - |     - |     0 |   1.78s | 
+7. OpenCV contour + Tesseract       |     - |     - |     - |     0 |   5.19s | 
+8. Screen detect + warp + Tesseract |     - |     - |     - |     0 |   1.77s | 
+11. Qwen3-VL:2b (Ollama)            |   128 |    70 |    12 |     1 |   1.34s | 
+12. Qwen3-VL:2b warped (Ollama)     |   128 |    78 |    73 |     2 |   2.75s | 
 ================================================================================
 
 DETAILED RAW OUTPUTS
@@ -41,15 +43,14 @@ Raw: 14
 
 --- 3. PaddleOCR ---
 Raw: 
-Error: (Unimplemented) ConvertPirAttribute2RuntimeAttribute not support [pir::ArrayAttribute<pir::DoubleAttribute>]  (at /paddle/paddle/fluid/framework/new_executor/instruction/onednn/onednn_instruction.cc:116)
-
+Error: No module named 'paddleocr'
 
 --- 4. EasyOCR (spatial) ---
 Raw: 
 
 --- 5. TrOCR (printed) ---
-Raw: 0.00
-0.00
+Raw: 
+Error: not installed
 
 --- 6. Surya OCR ---
 Raw: 
@@ -66,6 +67,16 @@ DIA | a "7
 EG).
 PUL  _-_
 
+--- 11. Qwen3-VL:2b (Ollama) ---
+Raw: SYS: 128
+DIA: 70
+PUL: 12
+
+--- 12. Qwen3-VL:2b warped (Ollama) ---
+Raw: SYS: 128
+DIA: 78
+PUL: 73
+
 
 ################################################################################
 
@@ -75,14 +86,16 @@ Ground truth: SYS=128, DIA=78, PUL=72
 ================================================================================
 Engine                              |   SYS |   DIA |   PUL | Score |    Time | Error
 ------------------------------------+-------+-------+-------+-------+---------+------
-1. Tesseract default (PSM 6/11/3)   |   128 |    78 |    72 |     3 |   0.87s | 
-2. Tesseract digit whitelist        |   128 |    78 |    72 |     3 |   0.63s | 
-3. PaddleOCR                        |     - |     - |     - |     0 |   2.55s | (Unimplemented) ConvertPirAttr
-4. EasyOCR (spatial)                |   128 |    78 |    72 |     3 |   3.09s | 
-5. TrOCR (printed)                  |     - |     - |     - |     0 |  11.56s | 
+1. Tesseract default (PSM 6/11/3)   |   128 |    78 |    72 |     3 |   0.86s | 
+2. Tesseract digit whitelist        |   128 |    78 |    72 |     3 |   0.61s | 
+3. PaddleOCR                        |     - |     - |     - |     0 |   0.00s | No module named 'paddleocr'
+4. EasyOCR (spatial)                |   128 |    78 |    72 |     3 |   3.10s | 
+5. TrOCR (printed)                  |     - |     - |     - |     0 |   0.00s | not installed
 6. Surya OCR                        |     - |     - |     - |     0 |   0.00s | not installed
-7. OpenCV contour + Tesseract       |     - |     - |     - |     0 |  21.36s | 
-8. Screen detect + warp + Tesseract |   128 |    78 |    72 |     3 |   1.47s | 
+7. OpenCV contour + Tesseract       |     - |     - |     - |     0 |  20.72s | 
+8. Screen detect + warp + Tesseract |   128 |    78 |    72 |     3 |   1.46s | 
+11. Qwen3-VL:2b (Ollama)            |   128 |    78 |    72 |     3 |   3.13s | 
+12. Qwen3-VL:2b warped (Ollama)     |   128 |    78 |   173 |     2 |   3.51s | 
 ================================================================================
 
 DETAILED RAW OUTPUTS
@@ -104,8 +117,7 @@ Raw: 128
 
 --- 3. PaddleOCR ---
 Raw: 
-Error: (Unimplemented) ConvertPirAttribute2RuntimeAttribute not support [pir::ArrayAttribute<pir::DoubleAttribute>]  (at /paddle/paddle/fluid/framework/new_executor/instruction/onednn/onednn_instruction.cc:116)
-
+Error: No module named 'paddleocr'
 
 --- 4. EasyOCR (spatial) ---
 Raw: SYS 128
@@ -113,14 +125,8 @@ DIA 78
 PUL 72
 
 --- 5. TrOCR (printed) ---
-Raw: *** ****
-2
-8
-1
-8
-7
-2
-7
+Raw: 
+Error: not installed
 
 --- 6. Surya OCR ---
 Raw: 
@@ -147,6 +153,16 @@ PUL
 /min
 
 72
+
+--- 11. Qwen3-VL:2b (Ollama) ---
+Raw: SYS: 128
+DIA: 78
+PUL: 72
+
+--- 12. Qwen3-VL:2b warped (Ollama) ---
+Raw: SYS: 128
+DIA: 78
+PUL: 173
 
 
 ################################################################################
