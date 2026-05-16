@@ -74,22 +74,43 @@ def score_output(raw_text: str) -> dict:
 
 
 def _find_digit_nearby(lines: list, idx: int) -> int:
-    """Find a 2-3 digit number on the same line or next lines."""
-    # Check same line
-    match = re.search(r"(\d{2,3})", lines[idx])
+    """Find a 2-3 digit number on the same line or next lines.
+
+    Skips unit labels (mmHg, kPa, etc.) and model numbers when searching.
+    """
+    unit_words = {"mmhg", "kpa", "bpm", "pul/min", "pulse/min", "/min"}
+
+    # Check same line (exclude the label itself)
+    line_text = re.sub(r"(sys|dia|pul|pulse|systolic|diastolic)", "", lines[idx], flags=re.IGNORECASE)
+    # Remove model numbers like D2-65A
+    line_text = re.sub(r"[A-Za-z]\d+[-]?\d*[A-Za-z]?", "", line_text)
+    match = re.search(r"(\d{2,3})", line_text)
     if match:
         val = int(match.group(1))
         if 30 <= val <= 250:
             return val
-    # Check next lines
-    for j in range(idx + 1, min(idx + 3, len(lines))):
+    # Check next lines (search further: up to 5 lines)
+    for j in range(idx + 1, min(idx + 6, len(lines))):
         line = lines[j].strip()
         if not line:
             continue
+        # Skip unit-only lines
+        if line.lower() in unit_words:
+            continue
+        # Skip model number lines (e.g. D2-65A)
+        if re.match(r"^[A-Za-z]?\d+[-]\d*[A-Za-z]*$", line):
+            continue
+        # Skip lines that are other labels
+        if any(lbl in line.lower() for lbl in ["sys", "dia", "pul", "on", "off"]):
+            break
         match = re.search(r"^(\d{2,3})$", line)
         if match:
-            return int(match.group(1))
-        match = re.search(r"(\d{2,3})", line)
+            val = int(match.group(1))
+            if 30 <= val <= 250:
+                return val
+        # Remove model numbers before checking
+        cleaned = re.sub(r"[A-Za-z]\d+[-]?\d*[A-Za-z]?", "", line)
+        match = re.search(r"(\d{2,3})", cleaned)
         if match:
             val = int(match.group(1))
             if 30 <= val <= 250:
@@ -231,6 +252,8 @@ def engine_tesseract_digits():
 # ============================================================
 
 def engine_paddleocr():
+    import os
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Force CPU mode
     from paddleocr import PaddleOCR
 
     ocr = PaddleOCR(lang="en")
@@ -260,6 +283,8 @@ def engine_paddleocr():
 # ============================================================
 
 def engine_easyocr():
+    import os
+    os.environ["NCCL_P2P_DISABLE"] = "1"
     import easyocr
 
     reader = easyocr.Reader(["en"], gpu=True)
@@ -444,6 +469,17 @@ def engine_contour_tesseract():
 
 
 # ============================================================
+# ENGINE 8 — Screen detect + warp + Tesseract
+# ============================================================
+
+def engine_screen_detect_warp():
+    from screen_detector import detect_and_ocr
+
+    text = detect_and_ocr(IMAGE_PATH, debug_output=True)
+    return text
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
@@ -573,6 +609,9 @@ if __name__ == "__main__":
 
     # Engine 7: Contour crop + Tesseract
     run_engine("7. OpenCV contour + Tesseract", engine_contour_tesseract)
+
+    # Engine 8: Screen detect + warp + Tesseract
+    run_engine("8. Screen detect + warp + Tesseract", engine_screen_detect_warp)
 
     # Print summary
     print_summary()

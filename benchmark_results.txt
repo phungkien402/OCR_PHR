@@ -4,13 +4,14 @@ Ground truth: SYS=128, DIA=78, PUL=72
 ================================================================================
 Engine                              |   SYS |   DIA |   PUL | Score |    Time | Error
 ------------------------------------+-------+-------+-------+-------+---------+------
-1. Tesseract default (PSM 6/11/3)   |     - |     - |    65 |     0 |   1.98s | 
-2. Tesseract digit whitelist        |     - |     - |     - |     0 |   1.14s | 
-3. PaddleOCR                        |     - |     - |     - |     0 |   4.17s | (Unimplemented) ConvertPirAttr
-4. EasyOCR                          |     - |     - |     - |     0 |   3.11s | NCCL Error 1: unhandled cuda e
-5. TrOCR (printed)                  |     - |     - |     - |     0 |  10.00s | 
+1. Tesseract default (PSM 6/11/3)   |     - |     - |     - |     0 |   2.00s | 
+2. Tesseract digit whitelist        |     - |     - |     - |     0 |   1.15s | 
+3. PaddleOCR                        |     - |     - |     - |     0 |   4.21s | (Unimplemented) ConvertPirAttr
+4. EasyOCR                          |    78 |     - |    99 |     0 |   4.24s | 
+5. TrOCR (printed)                  |     - |     - |     - |     0 |  10.59s | 
 6. Surya OCR                        |     - |     - |     - |     0 |   0.00s | not installed
-7. OpenCV contour + Tesseract       |     - |     - |     - |     0 |   5.22s | 
+7. OpenCV contour + Tesseract       |     - |     - |     - |     0 |   5.21s | 
+8. Screen detect + warp + Tesseract |     - |     - |     - |     0 |   1.76s | 
 ================================================================================
 
 
@@ -45,8 +46,15 @@ Error: (Unimplemented) ConvertPirAttribute2RuntimeAttribute not support [pir::Ar
 
 
 --- 4. EasyOCR ---
-Raw: 
-Error: NCCL Error 1: unhandled cuda error (run with NCCL_DEBUG=INFO for details)
+Raw: Zcroue (0.38)
+K (0.00)
+SYS (1.00)
+78 (0.19)
+kPa (1.00)
+DIA (1.00)
+mmHg (1.00)
+PUL (1.00)
+PULImin (0.
 
 --- 5. TrOCR (printed) ---
 Raw: 0.00
@@ -58,3 +66,11 @@ Error: not installed
 
 --- 7. OpenCV contour + Tesseract ---
 Raw: 
+
+--- 8. Screen detect + warp + Tesseract ---
+Raw: SYS} Gf _f ry
+(og:
+
+DIA | a "7
+EG).
+PUL  _-_
