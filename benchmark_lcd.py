@@ -693,6 +693,76 @@ def engine_qwen3_vl_ollama_warped():
 
 
 # ============================================================
+# ENGINE 13 — Qwen3-VL:4b (Ollama)
+# ============================================================
+
+def engine_qwen3_vl_4b_ollama():
+    import base64
+    import requests
+
+    with open(CURRENT_IMAGE, "rb") as f:
+        img_b64 = base64.b64encode(f.read()).decode()
+
+    payload = {
+        "model": "qwen3-vl:4b",
+        "messages": [{
+            "role": "user",
+            "content": (
+                "This is a blood pressure monitor display. "
+                "Read the three numbers shown next to the labels SYS, DIA, and PUL. "
+                "Reply ONLY in this exact format with no other text:\n"
+                "SYS: <number>\n"
+                "DIA: <number>\n"
+                "PUL: <number>"
+            ),
+            "images": [img_b64]
+        }],
+        "stream": False
+    }
+
+    resp = requests.post("http://localhost:11434/api/chat", json=payload, timeout=120)
+    resp.raise_for_status()
+    return resp.json()["message"]["content"]
+
+
+# ============================================================
+# ENGINE 14 — Qwen3-VL:4b on warped image (Ollama)
+# ============================================================
+
+def engine_qwen3_vl_4b_ollama_warped():
+    import base64
+    import requests
+
+    warped_path = "output/debug_warped_may-do-huyet-ap-bap-tay-d2group-kf-65a.png"
+    if not os.path.exists(warped_path):
+        return "ERROR: warped image not found"
+
+    with open(warped_path, "rb") as f:
+        img_b64 = base64.b64encode(f.read()).decode()
+
+    payload = {
+        "model": "qwen3-vl:4b",
+        "messages": [{
+            "role": "user",
+            "content": (
+                "This is a blood pressure monitor display. "
+                "Read the three numbers shown next to the labels SYS, DIA, and PUL. "
+                "Reply ONLY in this exact format with no other text:\n"
+                "SYS: <number>\n"
+                "DIA: <number>\n"
+                "PUL: <number>"
+            ),
+            "images": [img_b64]
+        }],
+        "stream": False
+    }
+
+    resp = requests.post("http://localhost:11434/api/chat", json=payload, timeout=120)
+    resp.raise_for_status()
+    return resp.json()["message"]["content"]
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
@@ -845,6 +915,32 @@ def run_all_engines():
         print(f"\n[SKIP] Qwen3-VL warped not available: {e}")
         results.append({
             "engine": "12. Qwen3-VL:2b warped (Ollama)",
+            "raw": "", "sys": None, "dia": None, "pul": None,
+            "score": 0, "time": 0, "error": str(e)[:50],
+        })
+
+    # Engine 13: Qwen3-VL:4b (Ollama)
+    try:
+        import requests
+        requests.get("http://localhost:11434/api/tags", timeout=5)
+        run_engine("13. Qwen3-VL:4b (Ollama)", engine_qwen3_vl_4b_ollama)
+    except Exception as e:
+        print(f"\n[SKIP] Qwen3-VL:4b not available: {e}")
+        results.append({
+            "engine": "13. Qwen3-VL:4b (Ollama)",
+            "raw": "", "sys": None, "dia": None, "pul": None,
+            "score": 0, "time": 0, "error": str(e)[:50],
+        })
+
+    # Engine 14: Qwen3-VL:4b on warped image (Ollama)
+    try:
+        import requests
+        requests.get("http://localhost:11434/api/tags", timeout=5)
+        run_engine("14. Qwen3-VL:4b warped (Ollama)", engine_qwen3_vl_4b_ollama_warped)
+    except Exception as e:
+        print(f"\n[SKIP] Qwen3-VL:4b warped not available: {e}")
+        results.append({
+            "engine": "14. Qwen3-VL:4b warped (Ollama)",
             "raw": "", "sys": None, "dia": None, "pul": None,
             "score": 0, "time": 0, "error": str(e)[:50],
         })

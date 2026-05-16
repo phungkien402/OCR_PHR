@@ -5,15 +5,17 @@ Ground truth: SYS=128, DIA=78, PUL=72
 Engine                              |   SYS |   DIA |   PUL | Score |    Time | Error
 ------------------------------------+-------+-------+-------+-------+---------+------
 1. Tesseract default (PSM 6/11/3)   |     - |     - |     - |     0 |   1.70s | 
-2. Tesseract digit whitelist        |     - |     - |     - |     0 |   1.15s | 
+2. Tesseract digit whitelist        |     - |     - |     - |     0 |   1.12s | 
 3. PaddleOCR                        |     - |     - |     - |     0 |   0.00s | No module named 'paddleocr'
-4. EasyOCR (spatial)                |     - |     - |     - |     0 |   3.93s | 
+4. EasyOCR (spatial)                |     - |     - |     - |     0 |   3.85s | 
 5. TrOCR (printed)                  |     - |     - |     - |     0 |   0.00s | not installed
 6. Surya OCR                        |     - |     - |     - |     0 |   0.00s | not installed
-7. OpenCV contour + Tesseract       |     - |     - |     - |     0 |   5.19s | 
-8. Screen detect + warp + Tesseract |     - |     - |     - |     0 |   1.77s | 
-11. Qwen3-VL:2b (Ollama)            |   128 |    70 |    12 |     1 |   1.34s | 
-12. Qwen3-VL:2b warped (Ollama)     |   128 |    78 |    73 |     2 |   2.75s | 
+7. OpenCV contour + Tesseract       |     - |     - |     - |     0 |   5.21s | 
+8. Screen detect + warp + Tesseract |     - |     - |     - |     0 |   1.78s | 
+11. Qwen3-VL:2b (Ollama)            |   128 |    70 |    12 |     1 |   4.89s | 
+12. Qwen3-VL:2b warped (Ollama)     |   128 |    78 |    73 |     2 |   1.03s | 
+13. Qwen3-VL:4b (Ollama)            |   128 |    78 |    72 |     3 |   7.00s | 
+14. Qwen3-VL:4b warped (Ollama)     |   128 |    78 |    73 |     2 |   8.33s | 
 ================================================================================
 
 DETAILED RAW OUTPUTS
@@ -77,6 +79,16 @@ Raw: SYS: 128
 DIA: 78
 PUL: 73
 
+--- 13. Qwen3-VL:4b (Ollama) ---
+Raw: SYS: 128
+DIA: 78
+PUL: 72
+
+--- 14. Qwen3-VL:4b warped (Ollama) ---
+Raw: SYS: 128
+DIA: 78
+PUL: 73
+
 
 ################################################################################
 
@@ -86,16 +98,18 @@ Ground truth: SYS=128, DIA=78, PUL=72
 ================================================================================
 Engine                              |   SYS |   DIA |   PUL | Score |    Time | Error
 ------------------------------------+-------+-------+-------+-------+---------+------
-1. Tesseract default (PSM 6/11/3)   |   128 |    78 |    72 |     3 |   0.86s | 
-2. Tesseract digit whitelist        |   128 |    78 |    72 |     3 |   0.61s | 
+1. Tesseract default (PSM 6/11/3)   |   128 |    78 |    72 |     3 |   0.85s | 
+2. Tesseract digit whitelist        |   128 |    78 |    72 |     3 |   0.62s | 
 3. PaddleOCR                        |     - |     - |     - |     0 |   0.00s | No module named 'paddleocr'
-4. EasyOCR (spatial)                |   128 |    78 |    72 |     3 |   3.10s | 
+4. EasyOCR (spatial)                |   128 |    78 |    72 |     3 |   3.06s | 
 5. TrOCR (printed)                  |     - |     - |     - |     0 |   0.00s | not installed
 6. Surya OCR                        |     - |     - |     - |     0 |   0.00s | not installed
-7. OpenCV contour + Tesseract       |     - |     - |     - |     0 |  20.72s | 
-8. Screen detect + warp + Tesseract |   128 |    78 |    72 |     3 |   1.46s | 
-11. Qwen3-VL:2b (Ollama)            |   128 |    78 |    72 |     3 |   3.13s | 
-12. Qwen3-VL:2b warped (Ollama)     |   128 |    78 |   173 |     2 |   3.51s | 
+7. OpenCV contour + Tesseract       |     - |     - |     - |     0 |  20.61s | 
+8. Screen detect + warp + Tesseract |   128 |    78 |    72 |     3 |   1.45s | 
+11. Qwen3-VL:2b (Ollama)            |   128 |    78 |    72 |     3 |   8.42s | 
+12. Qwen3-VL:2b warped (Ollama)     |   128 |    78 |    73 |     2 |   1.10s | 
+13. Qwen3-VL:4b (Ollama)            |   128 |    78 |    72 |     3 |   8.31s | 
+14. Qwen3-VL:4b warped (Ollama)     |   128 |    78 |    73 |     2 |   4.30s | 
 ================================================================================
 
 DETAILED RAW OUTPUTS
@@ -162,7 +176,17 @@ PUL: 72
 --- 12. Qwen3-VL:2b warped (Ollama) ---
 Raw: SYS: 128
 DIA: 78
-PUL: 173
+PUL: 73
+
+--- 13. Qwen3-VL:4b (Ollama) ---
+Raw: SYS: 128
+DIA: 78
+PUL: 72
+
+--- 14. Qwen3-VL:4b warped (Ollama) ---
+Raw: SYS: 128
+DIA: 78
+PUL: 73
 
 
 ################################################################################
