@@ -161,24 +161,27 @@ input[type="file"] { display: none; }
                 <p class="filename" id="fileName2"></p>
             </div>
             <div class="mode-select">
-                <label>Mode:</label>
-                <select id="modeSelect">
-                    <option value="auto">Auto</option>
-                    <option value="lcd">LCD (Qwen3-VL:4b)</option>
-                    <option value="handwritten">Handwritten (VietOCR)</option>
+                <label>Model:</label>
+                <select id="modelSelect">
+                    <option value="qwen3_vl">Qwen3-VL:4b (vision)</option>
+                    <option value="vietocr">VietOCR (handwritten)</option>
                 </select>
             </div>
-            <button class="btn btn-primary" id="rawOcrBtn" disabled>Extract Raw Text</button>
+            <div class="prompt-field" id="promptField" style="margin-top:0.8rem;">
+                <label style="font-weight:600; color:#555; font-size:0.9rem; display:block; margin-bottom:0.3rem;">Prompt (Qwen3-VL only):</label>
+                <textarea id="promptInput" rows="3" style="width:100%; padding:0.6rem; border:1px solid #ddd; border-radius:6px; font-size:0.85rem; font-family:inherit; resize:vertical;">What text do you see in this image? List everything you can read.</textarea>
+            </div>
+            <button class="btn btn-primary" id="rawOcrBtn" disabled>Get Raw Model Output</button>
         </div>
         <div class="spinner" id="spinner2"></div>
         <div class="error-box" id="errorBox2"></div>
         <div class="card result-section" id="resultSection2">
-            <div class="result-header"><h2>Raw OCR Output</h2></div>
+            <div class="result-header"><h2>Raw model response (unfiltered)</h2></div>
             <div style="margin-bottom:0.8rem;">
-                <span class="meta-badge" id="modeDetected"></span>
-                <span class="meta-badge" id="engineUsed"></span>
+                <span class="meta-badge" id="modelUsed"></span>
+                <span class="meta-badge" id="promptUsed"></span>
             </div>
-            <div class="raw-text-output" id="rawTextOutput"></div>
+            <div class="raw-text-output" id="rawTextOutput" style="max-height:500px; overflow-y:auto;"></div>
         </div>
     </div>
 </div>
@@ -311,7 +314,15 @@ const rawOcrBtn = document.getElementById('rawOcrBtn');
 const spinner2 = document.getElementById('spinner2');
 const errorBox2 = document.getElementById('errorBox2');
 const resultSection2 = document.getElementById('resultSection2');
+const modelSelect = document.getElementById('modelSelect');
+const promptField = document.getElementById('promptField');
+const promptInput = document.getElementById('promptInput');
 let selectedFile2 = null;
+
+// Show/hide prompt field based on model selection
+modelSelect.addEventListener('change', () => {
+    promptField.style.display = modelSelect.value === 'qwen3_vl' ? 'block' : 'none';
+});
 
 dropZone2.addEventListener('click', () => fileInput2.click());
 dropZone2.addEventListener('dragover', (e) => { e.preventDefault(); dropZone2.classList.add('dragover'); });
@@ -345,11 +356,12 @@ rawOcrBtn.addEventListener('click', async () => {
     errorBox2.style.display = 'none';
     const formData = new FormData();
     formData.append('file', selectedFile2);
-    formData.append('mode', document.getElementById('modeSelect').value);
+    formData.append('model', modelSelect.value);
+    formData.append('prompt', promptInput.value);
     try {
-        const resp = await fetch('/raw-ocr', { method: 'POST', body: formData });
+        const resp = await fetch('/raw-model-output', { method: 'POST', body: formData });
         const data = await resp.json();
-        if (!resp.ok) { showError2(data.detail || 'OCR failed'); return; }
+        if (!resp.ok) { showError2(data.detail || 'Model request failed'); return; }
         displayRawOcr(data);
     } catch (err) { showError2('Connection error: ' + err.message); }
     finally { spinner2.style.display = 'none'; rawOcrBtn.disabled = false; }
@@ -358,9 +370,9 @@ rawOcrBtn.addEventListener('click', async () => {
 function showError2(msg) { errorBox2.textContent = msg; errorBox2.style.display = 'block'; }
 
 function displayRawOcr(data) {
-    document.getElementById('modeDetected').textContent = 'Mode: ' + data.mode_detected;
-    document.getElementById('engineUsed').textContent = 'Engine: ' + data.engine;
-    document.getElementById('rawTextOutput').textContent = data.raw_text || '(empty)';
+    document.getElementById('modelUsed').textContent = 'Model: ' + data.model;
+    document.getElementById('promptUsed').textContent = 'Prompt: ' + (data.prompt_used || '').substring(0, 60) + (data.prompt_used && data.prompt_used.length > 60 ? '...' : '');
+    document.getElementById('rawTextOutput').textContent = data.raw_response || '(empty)';
     resultSection2.style.display = 'block';
 }
 
@@ -466,6 +478,101 @@ async def raw_ocr(file: UploadFile = File(...), mode: str = Form("auto")):
         return JSONResponse(
             status_code=500,
             content={"detail": f"OCR error: {str(e)}"},
+        )
+    finally:
+        os.unlink(tmp_path)
+
+
+@app.post("/raw-model-output")
+async def raw_model_output(
+    file: UploadFile = File(...),
+    model: str = Form("qwen3_vl"),
+    prompt: str = Form("What text do you see in this image? List everything you can read."),
+):
+    """Get the TRUE raw response from the model with zero processing.
+
+    For qwen3_vl: sends image directly to Ollama with the given prompt.
+    For vietocr: runs predictor.predict() on the full image.
+    """
+    if file.content_type not in ("image/jpeg", "image/png"):
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "Only JPG and PNG images are supported."},
+        )
+
+    if model not in ("qwen3_vl", "vietocr"):
+        model = "qwen3_vl"
+
+    suffix = ".png" if "png" in file.content_type else ".jpg"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        content = await file.read()
+        tmp.write(content)
+        tmp_path = tmp.name
+
+    try:
+        if model == "qwen3_vl":
+            import base64
+            import cv2
+            import requests
+
+            img = cv2.imread(tmp_path)
+            if img is None:
+                return JSONResponse(
+                    status_code=400,
+                    content={"detail": "Failed to read image."},
+                )
+
+            success, img_encoded = cv2.imencode(".png", img)
+            if not success:
+                return JSONResponse(
+                    status_code=500,
+                    content={"detail": "Failed to encode image."},
+                )
+
+            img_b64 = base64.b64encode(img_encoded.tobytes()).decode()
+
+            payload = {
+                "model": "qwen3-vl:4b",
+                "messages": [{
+                    "role": "user",
+                    "content": prompt,
+                    "images": [img_b64],
+                }],
+                "stream": False,
+            }
+
+            resp = requests.post(
+                "http://localhost:11434/api/chat",
+                json=payload,
+                timeout=120,
+            )
+            resp.raise_for_status()
+            raw_response = resp.json()["message"]["content"]
+
+            return JSONResponse(content={
+                "raw_response": raw_response,
+                "model": "qwen3-vl:4b (Ollama)",
+                "prompt_used": prompt,
+            })
+
+        else:  # vietocr
+            from PIL import Image as PILImage
+            from ocr_vitals.ocr_engine import load_vietocr
+
+            predictor = load_vietocr("cuda:0")
+            pil_img = PILImage.open(tmp_path).convert("RGB")
+            raw_response = predictor.predict(pil_img)
+
+            return JSONResponse(content={
+                "raw_response": raw_response,
+                "model": "VietOCR vgg_transformer",
+                "prompt_used": "(n/a — VietOCR has no prompt)",
+            })
+
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"detail": f"Model error: {str(e)}"},
         )
     finally:
         os.unlink(tmp_path)
