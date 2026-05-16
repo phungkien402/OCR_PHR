@@ -45,9 +45,10 @@ def process_image(image_path: str, device: str, mode: str = "auto") -> dict:
 
         # Step 3: OCR based on detected mode
         if detected_mode == "lcd":
-            # Tesseract works best on the raw/lightly processed image
-            raw_text = extract_text(raw_img, device=device, mode="lcd")
-            ocr_engine_used = "tesseract_eng"
+            # Qwen3-VL via Ollama with screen warp preprocessing
+            raw_text = extract_text(raw_img, device=device, mode="lcd",
+                                    image_path=image_path)
+            ocr_engine_used = "qwen3_vl_2b_ollama"
         else:
             # VietOCR needs preprocessed image
             preprocessed = preprocess_image(image_path)

@@ -1,10 +1,17 @@
-"""OCR engine supporting Tesseract (LCD displays) and VietOCR (handwritten text).
+"""OCR engine supporting Qwen3-VL (LCD displays) and VietOCR (handwritten text).
+
+LCD pipeline:
+  1. Screen detection + perspective warp (screen_detector)
+  2. Qwen3-VL:2b via Ollama for digit recognition
+  3. Fallback: Tesseract on warped image if Ollama unavailable
 
 Image type detection is consolidated here — this is the single source of truth
 for deciding which OCR engine to use.
 """
 
 import logging
+import os
+import re
 
 import cv2
 import numpy as np
@@ -12,6 +19,10 @@ import torch
 from PIL import Image
 
 logger = logging.getLogger(__name__)
+
+# Ollama configuration
+OLLAMA_ENDPOINT = "http://localhost:11434/api/chat"
+OLLAMA_MODEL = "qwen3-vl:2b"
 
 _vietocr_predictor = None
 
@@ -121,13 +132,15 @@ def load_vietocr(device: str = "cuda:0"):
     return _vietocr_predictor
 
 
-def extract_text(image: np.ndarray, device: str = "cuda:0", mode: str = "auto") -> str:
+def extract_text(image: np.ndarray, device: str = "cuda:0", mode: str = "auto",
+                  image_path: str = None) -> str:
     """Extract text from a preprocessed image.
 
     Args:
         image: Preprocessed image as numpy array (grayscale or BGR).
         device: Target device for inference.
         mode: OCR mode - "lcd", "handwritten", or "auto".
+        image_path: Original image file path (needed for LCD warp pipeline).
 
     Returns:
         Extracted text string.
@@ -136,9 +149,123 @@ def extract_text(image: np.ndarray, device: str = "cuda:0", mode: str = "auto") 
         mode = detect_image_mode(image)
 
     if mode == "lcd":
-        return _extract_text_tesseract(image)
+        return _extract_text_lcd(image, image_path)
     else:
         return _extract_text_vietocr(image, device)
+
+
+def _extract_text_lcd(image: np.ndarray, image_path: str = None) -> str:
+    """Extract text from LCD display using Qwen3-VL via Ollama.
+
+    Pipeline:
+      1. Run screen_detector to get warped (perspective-corrected) image
+      2. Send warped image to Qwen3-VL:2b via Ollama
+      3. Fallback to Tesseract if Ollama is unavailable
+
+    Args:
+        image: Image as numpy array (grayscale or BGR).
+        image_path: Path to the original image file.
+
+    Returns:
+        Extracted text string.
+    """
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from screen_detector import detect_screen, warp_screen
+
+    # Step 1: Detect and warp the LCD screen
+    if len(image.shape) == 2:
+        bgr_image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    else:
+        bgr_image = image
+
+    warped = None
+    corners = detect_screen(bgr_image)
+    if corners is not None:
+        warped = warp_screen(bgr_image, corners)
+        logger.info("LCD screen detected and warped successfully")
+
+        # Save debug warped image
+        if image_path:
+            os.makedirs("output", exist_ok=True)
+            filename = os.path.basename(image_path)
+            debug_path = f"output/debug_warped_{filename}"
+            cv2.imwrite(debug_path, warped)
+            logger.info("Debug warped image saved: %s", debug_path)
+    else:
+        logger.warning("Screen detection failed, using original image for OCR")
+        warped = bgr_image
+
+    # Step 2: Try Qwen3-VL via Ollama
+    text = _extract_text_qwen3_vl(warped)
+    if text:
+        logger.info("Qwen3-VL extraction successful")
+        return text
+
+    # Step 3: Fallback to Tesseract on warped image
+    logger.warning("Qwen3-VL unavailable, falling back to Tesseract")
+    return _extract_text_tesseract(warped)
+
+
+def _extract_text_qwen3_vl(image: np.ndarray) -> str:
+    """Send image to Qwen3-VL:2b via Ollama for LCD digit recognition.
+
+    Args:
+        image: BGR image as numpy array.
+
+    Returns:
+        Extracted text string, or empty string if Ollama is unavailable.
+    """
+    import base64
+
+    try:
+        import requests
+    except ImportError:
+        logger.warning("requests library not available for Ollama API")
+        return ""
+
+    # Encode image as base64 PNG
+    success, img_encoded = cv2.imencode(".png", image)
+    if not success:
+        logger.error("Failed to encode image for Ollama")
+        return ""
+
+    img_b64 = base64.b64encode(img_encoded.tobytes()).decode()
+
+    prompt = (
+        "This is a blood pressure monitor display. "
+        "Read the numbers next to SYS, DIA, and PUL labels. "
+        "Reply ONLY in this format:\n"
+        "SYS: <number>\n"
+        "DIA: <number>\n"
+        "PUL: <number>"
+    )
+
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": [{
+            "role": "user",
+            "content": prompt,
+            "images": [img_b64]
+        }],
+        "stream": False
+    }
+
+    try:
+        resp = requests.post(OLLAMA_ENDPOINT, json=payload, timeout=120)
+        resp.raise_for_status()
+        content = resp.json()["message"]["content"]
+        logger.info("Qwen3-VL raw response: %s", repr(content))
+        return content
+    except requests.exceptions.ConnectionError:
+        logger.warning("Ollama not running at %s", OLLAMA_ENDPOINT)
+        return ""
+    except requests.exceptions.Timeout:
+        logger.warning("Ollama request timed out")
+        return ""
+    except Exception as e:
+        logger.warning("Ollama request failed: %s", e)
+        return ""
 
 
 def _extract_text_tesseract(image: np.ndarray) -> str:
