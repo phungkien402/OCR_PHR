@@ -8,6 +8,21 @@ from .config import FIELD_KEYWORDS
 
 logger = logging.getLogger(__name__)
 
+# English labels commonly found on LCD blood pressure monitors
+LCD_LABELS = {
+    "sys": "huyet_ap.tam_thu",
+    "systolic": "huyet_ap.tam_thu",
+    "dia": "huyet_ap.tam_truong",
+    "diastolic": "huyet_ap.tam_truong",
+    "pul": "mach",
+    "pulse": "mach",
+    "pul/min": "mach",
+    "pulse/min": "mach",
+}
+
+# Unit labels to capture as metadata (not affecting values)
+UNIT_LABELS = {"mmhg", "kpa", "bpm", "/min", "min"}
+
 
 def parse_vitals(raw_text: str) -> dict:
     """Parse vital signs from raw OCR text.
@@ -25,7 +40,11 @@ def parse_vitals(raw_text: str) -> dict:
     # Normalize text for matching
     normalized = _normalize_text(raw_text)
 
-    vitals = {
+    # Try LCD label parsing first (for BP monitor images)
+    lcd_vitals = _parse_lcd_labels(normalized)
+
+    # Then try Vietnamese keyword parsing
+    keyword_vitals = {
         "mach": _extract_integer(normalized, "mach"),
         "nhiet_do": _extract_float(normalized, "nhiet_do"),
         "huyet_ap": _extract_blood_pressure(normalized),
@@ -35,7 +54,99 @@ def parse_vitals(raw_text: str) -> dict:
         "spo2": _extract_integer(normalized, "spo2"),
     }
 
+    # Merge: LCD results take priority where available
+    vitals = _merge_vitals(keyword_vitals, lcd_vitals)
+
     logger.info("Parsed vitals: %s", vitals)
+    return vitals
+
+
+def _parse_lcd_labels(text: str) -> dict:
+    """Parse LCD blood pressure monitor labels (SYS, DIA, PUL).
+
+    Args:
+        text: Normalized OCR text.
+
+    Returns:
+        Partial vitals dict with values found via LCD labels.
+    """
+    result = {
+        "mach": None,
+        "huyet_ap": None,
+    }
+
+    tam_thu = None
+    tam_truong = None
+    units = []
+
+    # Search for LCD label patterns: "SYS 128", "DIA 78", "PUL 72"
+    # Also handle "SYS:128", "SYS.128", "SYS128"
+    for label, field in LCD_LABELS.items():
+        # Pattern: label followed by optional separator then number
+        pattern = re.escape(label) + r"[\s.:;=]*(\d{2,3})"
+        match = re.search(pattern, text)
+        if match:
+            value = int(match.group(1))
+            if field == "huyet_ap.tam_thu":
+                tam_thu = value
+                logger.debug("LCD: SYS = %d", value)
+            elif field == "huyet_ap.tam_truong":
+                tam_truong = value
+                logger.debug("LCD: DIA = %d", value)
+            elif field == "mach":
+                result["mach"] = value
+                logger.debug("LCD: PUL = %d", value)
+
+    # Capture unit metadata
+    for unit in UNIT_LABELS:
+        if unit in text:
+            units.append(unit)
+
+    if tam_thu is not None or tam_truong is not None:
+        result["huyet_ap"] = {"tam_thu": tam_thu, "tam_truong": tam_truong}
+
+    if units:
+        result["_units"] = units
+        logger.debug("LCD units detected: %s", units)
+
+    return result
+
+
+def _merge_vitals(keyword_vitals: dict, lcd_vitals: dict) -> dict:
+    """Merge keyword-parsed vitals with LCD-parsed vitals.
+
+    LCD results take priority where they provide non-None values.
+
+    Args:
+        keyword_vitals: Results from Vietnamese keyword parsing.
+        lcd_vitals: Results from LCD label parsing.
+
+    Returns:
+        Merged vitals dictionary.
+    """
+    vitals = keyword_vitals.copy()
+
+    # LCD mach overrides keyword mach
+    if lcd_vitals.get("mach") is not None:
+        vitals["mach"] = lcd_vitals["mach"]
+
+    # LCD blood pressure overrides keyword blood pressure
+    lcd_bp = lcd_vitals.get("huyet_ap")
+    if lcd_bp is not None:
+        if vitals["huyet_ap"] is None:
+            vitals["huyet_ap"] = {}
+        if lcd_bp.get("tam_thu") is not None:
+            vitals["huyet_ap"]["tam_thu"] = lcd_bp["tam_thu"]
+        if lcd_bp.get("tam_truong") is not None:
+            vitals["huyet_ap"]["tam_truong"] = lcd_bp["tam_truong"]
+        # Clean up None sub-fields
+        if vitals["huyet_ap"].get("tam_thu") is None and vitals["huyet_ap"].get("tam_truong") is None:
+            vitals["huyet_ap"] = None
+
+    # Store unit metadata if present
+    if "_units" in lcd_vitals:
+        vitals["_units"] = lcd_vitals["_units"]
+
     return vitals
 
 

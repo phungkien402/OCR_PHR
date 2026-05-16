@@ -38,6 +38,68 @@ def preprocess_image(image_path: str, mode: str = "auto") -> np.ndarray:
         gray = cv2.resize(gray, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
         logger.debug("Resized image from %dx%d to %dx%d", w, h, new_w, new_h)
 
+    # Determine mode if auto
+    if mode == "auto":
+        mode = _detect_image_type(gray)
+        logger.debug("Auto-detected image type: %s", mode)
+
+    if mode == "lcd":
+        processed = _preprocess_lcd(gray)
+    else:
+        processed = _preprocess_handwritten(gray)
+
+    logger.info("Preprocessing complete (mode=%s)", mode)
+    return processed
+
+
+def preprocess_image_raw(image_path: str) -> np.ndarray:
+    """Load image with minimal preprocessing (for EasyOCR which does its own).
+
+    Args:
+        image_path: Path to the input image.
+
+    Returns:
+        Image as BGR numpy array (resized if needed).
+    """
+    img = cv2.imread(image_path)
+    if img is None:
+        raise ValueError(f"Cannot read image: {image_path}")
+
+    # Resize if too small
+    h, w = img.shape[:2]
+    min_dim = min(h, w)
+    if min_dim < 800:
+        scale = 800 / min_dim
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+        img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+
+    return img
+
+
+def _preprocess_lcd(gray: np.ndarray) -> np.ndarray:
+    """Preprocess LCD/digital display image.
+
+    Optimized for 7-segment displays with high contrast digits.
+    """
+    # Apply CLAHE with higher clip limit for LCD
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+
+    # Light denoise (preserve sharp digit edges)
+    denoised = cv2.fastNlMeansDenoising(enhanced, None, h=5, templateWindowSize=7, searchWindowSize=21)
+
+    # Otsu thresholding for LCD/digital display images
+    _, processed = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    return processed
+
+
+def _preprocess_handwritten(gray: np.ndarray) -> np.ndarray:
+    """Preprocess handwritten text image.
+
+    Optimized for varied strokes and textured backgrounds.
+    """
     # Apply CLAHE for contrast enhancement
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     enhanced = clahe.apply(gray)
@@ -45,23 +107,12 @@ def preprocess_image(image_path: str, mode: str = "auto") -> np.ndarray:
     # Denoise
     denoised = cv2.fastNlMeansDenoising(enhanced, None, h=10, templateWindowSize=7, searchWindowSize=21)
 
-    # Determine mode if auto
-    if mode == "auto":
-        mode = _detect_image_type(denoised)
-        logger.debug("Auto-detected image type: %s", mode)
+    # Adaptive thresholding for handwritten images
+    processed = cv2.adaptiveThreshold(
+        denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY, 11, 2
+    )
 
-    # Apply thresholding based on mode
-    if mode == "lcd":
-        # Otsu thresholding for LCD/digital display images
-        _, processed = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    else:
-        # Adaptive thresholding for handwritten images
-        processed = cv2.adaptiveThreshold(
-            denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY, 11, 2
-        )
-
-    logger.info("Preprocessing complete (mode=%s)", mode)
     return processed
 
 

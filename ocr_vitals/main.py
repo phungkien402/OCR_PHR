@@ -11,7 +11,7 @@ from pathlib import Path
 from .config import DEVICE
 from .ocr_engine import extract_text
 from .parser import parse_vitals
-from .preprocessor import preprocess_image
+from .preprocessor import preprocess_image, preprocess_image_raw
 from .validator import validate_vitals
 
 logger = logging.getLogger(__name__)
@@ -19,29 +19,52 @@ logger = logging.getLogger(__name__)
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp"}
 
 
-def process_image(image_path: str, device: str) -> dict:
+def process_image(image_path: str, device: str, mode: str = "auto") -> dict:
     """Process a single image and extract vital signs.
 
     Args:
         image_path: Path to the input image.
         device: Device for OCR inference.
+        mode: OCR mode - "lcd", "handwritten", or "auto".
 
     Returns:
         Result dictionary with extracted vitals and metadata.
     """
     filename = os.path.basename(image_path)
-    logger.info("Processing image: %s", filename)
+    logger.info("Processing image: %s (mode=%s)", filename, mode)
 
     try:
         # Step 1: Preprocess
+        # For LCD mode, also prepare raw image (EasyOCR does its own preprocessing)
         preprocessed = preprocess_image(image_path)
 
-        # Step 2: OCR
-        raw_text = extract_text(preprocessed, device=device)
+        # Step 2: OCR - use raw image for LCD, preprocessed for handwritten
+        if mode == "lcd":
+            raw_img = preprocess_image_raw(image_path)
+            raw_text = extract_text(raw_img, device=device, mode=mode)
+            ocr_engine_used = "easyocr_en"
+        elif mode == "handwritten":
+            raw_text = extract_text(preprocessed, device=device, mode=mode)
+            ocr_engine_used = "vietocr_vgg_transformer"
+        else:
+            # Auto mode: detect from preprocessed, then use appropriate image
+            from .ocr_engine import detect_image_mode
+            detected_mode = detect_image_mode(preprocessed)
+            if detected_mode == "lcd":
+                raw_img = preprocess_image_raw(image_path)
+                raw_text = extract_text(raw_img, device=device, mode="lcd")
+                ocr_engine_used = "easyocr_en"
+            else:
+                raw_text = extract_text(preprocessed, device=device, mode="handwritten")
+                ocr_engine_used = "vietocr_vgg_transformer"
+
         logger.info("OCR extracted text length: %d chars", len(raw_text))
 
         # Step 3: Parse vitals
         vitals = parse_vitals(raw_text)
+
+        # Remove internal metadata before output
+        units = vitals.pop("_units", None)
 
         # Step 4: Validate
         validation, missing_fields = validate_vitals(vitals)
@@ -52,16 +75,19 @@ def process_image(image_path: str, device: str) -> dict:
             "vitals": vitals,
             "validation": validation,
             "missing_fields": missing_fields,
-            "ocr_engine": "vietocr_vgg_transformer",
+            "ocr_engine": ocr_engine_used,
             "processed_at": datetime.now().isoformat(timespec="seconds"),
         }
+
+        if units:
+            result["units_detected"] = units
 
     except Exception as e:
         logger.error("Error processing %s: %s", filename, e)
         result = {
             "source_image": filename,
             "error": str(e),
-            "ocr_engine": "vietocr_vgg_transformer",
+            "ocr_engine": "unknown",
             "processed_at": datetime.now().isoformat(timespec="seconds"),
         }
 
@@ -141,6 +167,14 @@ def main():
         help=f"Device for OCR inference (default: {DEVICE})",
     )
     parser.add_argument(
+        "--mode", "-m",
+        choices=["auto", "lcd", "handwritten"],
+        default="auto",
+        help="OCR mode: lcd (EasyOCR for digital displays), "
+             "handwritten (VietOCR for Vietnamese text), "
+             "auto (detect automatically, default)",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Enable verbose (DEBUG) logging",
@@ -165,14 +199,14 @@ def main():
         logger.warning("No images found to process")
         sys.exit(0)
 
-    logger.info("Processing %d image(s) on device: %s", len(image_files), args.device)
+    logger.info("Processing %d image(s) on device: %s (mode: %s)", len(image_files), args.device, args.mode)
 
     # Process each image
     success_count = 0
     error_count = 0
 
     for image_path in image_files:
-        result = process_image(image_path, device=args.device)
+        result = process_image(image_path, device=args.device, mode=args.mode)
         save_result(result, args.output)
 
         if "error" in result:
