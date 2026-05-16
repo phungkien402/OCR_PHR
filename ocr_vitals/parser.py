@@ -37,6 +37,15 @@ def parse_vitals(raw_text: str) -> dict:
     logger.info("Parsing vital signs from OCR text")
     logger.debug("Raw text:\n%s", raw_text)
 
+    # Try Qwen3-VL markdown table format first
+    qwen_vitals = parse_qwen_markdown(raw_text)
+    if qwen_vitals is not None:
+        non_null = sum(1 for k, v in qwen_vitals.items()
+                       if k != "_units" and v is not None)
+        if non_null >= 1:
+            logger.info("Qwen markdown parser matched %d field(s)", non_null)
+            return qwen_vitals
+
     # Normalize text for matching
     normalized = _normalize_text(raw_text)
 
@@ -59,6 +68,253 @@ def parse_vitals(raw_text: str) -> dict:
 
     logger.info("Parsed vitals: %s", vitals)
     return vitals
+
+
+# === Qwen3-VL Markdown Parser ===
+
+# Fuzzy label → field mapping (diacritics stripped, lowercase)
+_LABEL_MAP = {
+    "mach": "mach",
+    "mạch": "mach",
+    "pulse": "mach",
+    "hr": "mach",
+    "heart rate": "mach",
+    "nhiet do": "nhiet_do",
+    "nhiệt độ": "nhiet_do",
+    "nhiet độ": "nhiet_do",
+    "nhiệt do": "nhiet_do",
+    "temp": "nhiet_do",
+    "temperature": "nhiet_do",
+    "huyet ap": "huyet_ap",
+    "huyết áp": "huyet_ap",
+    "huyet áp": "huyet_ap",
+    "huyết ap": "huyet_ap",
+    "blood pressure": "huyet_ap",
+    "bp": "huyet_ap",
+    "ha": "huyet_ap",
+    "nhip tho": "nhip_tho",
+    "nhịp thở": "nhip_tho",
+    "nhip thở": "nhip_tho",
+    "nhịp tho": "nhip_tho",
+    "nup tho": "nhip_tho",
+    "respiratory rate": "nhip_tho",
+    "rr": "nhip_tho",
+    "can nang": "can_nang",
+    "cân nặng": "can_nang",
+    "can ngang": "can_nang",
+    "cân nang": "can_nang",
+    "can nặng": "can_nang",
+    "weight": "can_nang",
+    "chieu cao": "chieu_cao",
+    "chiều cao": "chieu_cao",
+    "chieu cao": "chieu_cao",
+    "chiều cao": "chieu_cao",
+    "height": "chieu_cao",
+    "spo2": "spo2",
+    "sp02": "spo2",
+    "o2": "spo2",
+}
+
+
+def parse_qwen_markdown(text: str) -> dict:
+    """Parse Qwen3-VL markdown table output with Cột A/Cột B structure.
+
+    Expected format:
+      - **Cột A**:
+        - (row 1): "Mạch"
+        - (row 2): "Nhiệt độ"
+      - **Cột B**:
+        - (row 1): "100"
+        - (row 2): "37"
+
+    Args:
+        text: Raw text from Qwen3-VL model.
+
+    Returns:
+        Vitals dict if markdown structure detected, None otherwise.
+    """
+    # Check if text contains the Cột A / Cột B structure
+    if not re.search(r"[Cc][oôộ]t\s*[AB]", text, re.IGNORECASE):
+        return None
+
+    logger.debug("Qwen markdown structure detected")
+
+    # Extract rows from Cột A (labels)
+    col_a_rows = _extract_column_rows(text, "A")
+    # Extract rows from Cột B (values)
+    col_b_rows = _extract_column_rows(text, "B")
+
+    if not col_a_rows or not col_b_rows:
+        logger.debug("Could not extract column rows (A=%d, B=%d)",
+                     len(col_a_rows), len(col_b_rows))
+        return None
+
+    logger.debug("Cột A rows: %s", col_a_rows)
+    logger.debug("Cột B rows: %s", col_b_rows)
+
+    # Match by row number and map labels to fields
+    vitals = {
+        "mach": None,
+        "nhiet_do": None,
+        "huyet_ap": None,
+        "nhip_tho": None,
+        "can_nang": None,
+        "chieu_cao": None,
+        "spo2": None,
+    }
+
+    for row_num, label in col_a_rows.items():
+        value_str = col_b_rows.get(row_num)
+        if value_str is None:
+            continue
+
+        field = _fuzzy_map_label(label)
+        if field is None:
+            logger.debug("Unmapped label: '%s' (row %d)", label, row_num)
+            continue
+
+        # Parse value based on field type
+        parsed_value = _parse_field_value(field, value_str)
+        if parsed_value is not None:
+            vitals[field] = parsed_value
+            logger.debug("Qwen markdown: %s = %s (from '%s')", field, parsed_value, value_str)
+
+    return vitals
+
+
+def _extract_column_rows(text: str, column: str) -> dict:
+    """Extract row data from a specific column (A or B).
+
+    Handles patterns like:
+      - (row 1): "value"
+      - (row 2): "value"
+
+    Args:
+        text: Full markdown text.
+        column: "A" or "B".
+
+    Returns:
+        Dict mapping row_num (int) → value (str).
+    """
+    rows = {}
+
+    # Find the section for this column
+    # Match "Cột A", "Cot A", "cột A", etc.
+    col_pattern = re.compile(
+        r"[Cc][oôộ]t\s*" + re.escape(column) + r".*?\n(.*?)(?=[Cc][oôộ]t\s*[A-Z]|\Z)",
+        re.DOTALL | re.IGNORECASE,
+    )
+    col_match = col_pattern.search(text)
+    if not col_match:
+        return rows
+
+    section = col_match.group(1)
+
+    # Try with quotes first (smart quotes or straight quotes)
+    for match in re.finditer(
+        r'\(row\s*(\d+)\)\s*:\s*[“””\']+([^“””\'\n]+)[“””\']+',
+        section, re.IGNORECASE,
+    ):
+        row_num = int(match.group(1))
+        value = match.group(2).strip()
+        rows[row_num] = value
+
+    # If no quoted matches, try unquoted
+    if not rows:
+        for match in re.finditer(r'\(row\s*(\d+)\)\s*:\s*(.+)', section, re.IGNORECASE):
+            row_num = int(match.group(1))
+            value = match.group(2).strip().strip('“””\'')
+            if value:
+                rows[row_num] = value
+
+    return rows
+
+
+def _fuzzy_map_label(label: str) -> str:
+    """Map a label string to a vitals field using fuzzy matching.
+
+    Tries exact match, then diacritics-stripped match.
+
+    Args:
+        label: Label text from OCR (e.g. "Mạch", "Nhiet độ").
+
+    Returns:
+        Field name (e.g. "mach", "nhiet_do") or None.
+    """
+    label_lower = label.lower().strip()
+
+    # Exact match
+    if label_lower in _LABEL_MAP:
+        return _LABEL_MAP[label_lower]
+
+    # Strip diacritics and try again
+    label_no_diac = _remove_diacritics(label_lower)
+    if label_no_diac in _LABEL_MAP:
+        return _LABEL_MAP[label_no_diac]
+
+    # Try matching against diacritic-stripped keys
+    for key, field in _LABEL_MAP.items():
+        key_no_diac = _remove_diacritics(key)
+        if label_no_diac == key_no_diac:
+            return field
+
+    # Substring match for common OCR errors
+    for key, field in _LABEL_MAP.items():
+        key_no_diac = _remove_diacritics(key)
+        if len(key_no_diac) >= 4 and key_no_diac in label_no_diac:
+            return field
+
+    return None
+
+
+def _parse_field_value(field: str, value_str: str):
+    """Parse a value string into the appropriate type for a field.
+
+    Args:
+        field: Vitals field name.
+        value_str: Raw value string from OCR.
+
+    Returns:
+        Parsed value (int, float, or dict for huyet_ap), or None.
+    """
+    value_str = value_str.strip()
+
+    if field == "huyet_ap":
+        # Parse "110/65" or "110 / 65"
+        match = re.search(r"(\d{2,3})\s*[/\\-]\s*(\d{2,3})", value_str)
+        if match:
+            return {"tam_thu": int(match.group(1)), "tam_truong": int(match.group(2))}
+        return None
+
+    elif field == "nhiet_do":
+        # Parse float like "37", "37.5", "36,8"
+        match = re.search(r"(\d+[.,]?\d*)", value_str)
+        if match:
+            try:
+                return float(match.group(1).replace(",", "."))
+            except ValueError:
+                return None
+        return None
+
+    elif field == "can_nang":
+        # Parse float like "55", "55.5", "62,3"
+        match = re.search(r"(\d+[.,]?\d*)", value_str)
+        if match:
+            try:
+                return float(match.group(1).replace(",", "."))
+            except ValueError:
+                return None
+        return None
+
+    else:
+        # Integer fields: mach, nhip_tho, chieu_cao, spo2
+        match = re.search(r"(\d+)", value_str)
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                return None
+        return None
 
 
 def _parse_lcd_labels(text: str) -> dict:
