@@ -1,14 +1,17 @@
 {
   "source_image": "image (4).png",
-  "ocr_raw_text": "PY\n40\nL\nĐẾM\n19",
+  "ocr_raw_text": "Tệp  \nTrang đầu  \nChèn  \nChia sẻ  \n\nG13  \n↓  \n(arrow icon)  \n(× icon)  \n(✓ icon)  \nfx  \n↓  \n\nA  |  B  |  C  \n1  | Mạch    |  100  \n2  | Nhiệt độ |  37  \n3  | Huyết áp |  110/65  \n4  | Nhịp thở  |  50  \n5  | Cân nặng |  55  \n6  | Chiều cao |  160  \n7  | SPO2     |  40  \n8  |          |  \n9  |          |  \n10 |          |",
   "vitals": {
-    "mach": null,
-    "nhiet_do": null,
-    "huyet_ap": null,
-    "nhip_tho": null,
-    "can_nang": null,
-    "chieu_cao": null,
-    "spo2": null
+    "mach": 100,
+    "nhiet_do": 37.0,
+    "huyet_ap": {
+      "tam_thu": 110,
+      "tam_truong": 65
+    },
+    "nhip_tho": 50,
+    "can_nang": 55.0,
+    "chieu_cao": 160,
+    "spo2": 40
   },
   "fields_meta": {
     "mach": {
@@ -19,7 +22,7 @@
         60,
         100
       ],
-      "value": null
+      "value": 100
     },
     "nhiet_do": {
       "label_vn": "Nhiệt độ",
@@ -29,7 +32,7 @@
         36.1,
         37.2
       ],
-      "value": null
+      "value": 37.0
     },
     "huyet_ap": {
       "label_vn": "Huyết áp",
@@ -45,7 +48,10 @@
           80
         ]
       },
-      "value": null
+      "value": {
+        "tam_thu": 110,
+        "tam_truong": 65
+      }
     },
     "nhip_tho": {
       "label_vn": "Nhịp thở",
@@ -55,21 +61,21 @@
         12,
         20
       ],
-      "value": null
+      "value": 50
     },
     "can_nang": {
       "label_vn": "Cân nặng",
       "label_en": "Weight",
       "unit": "kg",
       "normal_range": null,
-      "value": null
+      "value": 55.0
     },
     "chieu_cao": {
       "label_vn": "Chiều cao",
       "label_en": "Height",
       "unit": "cm",
       "normal_range": null,
-      "value": null
+      "value": 160
     },
     "spo2": {
       "label_vn": "SpO2",
@@ -79,19 +85,17 @@
         95,
         100
       ],
-      "value": null
+      "value": 40
     }
   },
-  "validation": {},
-  "missing_fields": [
-    "mach",
-    "nhiet_do",
-    "huyet_ap",
-    "nhip_tho",
-    "can_nang",
-    "chieu_cao",
-    "spo2"
-  ],
-  "ocr_engine": "vietocr_vgg_transformer",
-  "processed_at": "2026-05-16T18:24:40"
+  "validation": {
+    "spo2": {
+      "out_of_range": true,
+      "value": 40,
+      "expected": "50-100"
+    }
+  },
+  "missing_fields": [],
+  "ocr_engine": "qwen3_vl_4b_ollama",
+  "processed_at": "2026-05-16T18:40:51"
 }

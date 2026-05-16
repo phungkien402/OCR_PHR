@@ -72,7 +72,7 @@ def parse_vitals(raw_text: str) -> dict:
 
 # === Qwen3-VL Markdown Parser ===
 
-# Fuzzy label → field mapping (diacritics stripped, lowercase)
+# Fuzzy label -> field mapping (diacritics stripped, lowercase)
 _LABEL_MAP = {
     "mach": "mach",
     "mạch": "mach",
@@ -89,6 +89,7 @@ _LABEL_MAP = {
     "huyết áp": "huyet_ap",
     "huyet áp": "huyet_ap",
     "huyết ap": "huyet_ap",
+    "huyệt áp": "huyet_ap",
     "blood pressure": "huyet_ap",
     "bp": "huyet_ap",
     "ha": "huyet_ap",
@@ -97,6 +98,8 @@ _LABEL_MAP = {
     "nhip thở": "nhip_tho",
     "nhịp tho": "nhip_tho",
     "nup tho": "nhip_tho",
+    "nạp thở": "nhip_tho",
+    "nap tho": "nhip_tho",
     "respiratory rate": "nhip_tho",
     "rr": "nhip_tho",
     "can nang": "can_nang",
@@ -112,47 +115,148 @@ _LABEL_MAP = {
     "height": "chieu_cao",
     "spo2": "spo2",
     "sp02": "spo2",
+    "spо2": "spo2",
     "o2": "spo2",
 }
 
 
 def parse_qwen_markdown(text: str) -> dict:
-    """Parse Qwen3-VL markdown table output with Cột A/Cột B structure.
+    """Parse Qwen3-VL markdown table output.
 
-    Expected format:
-      - **Cột A**:
-        - (row 1): "Mạch"
-        - (row 2): "Nhiệt độ"
-      - **Cột B**:
-        - (row 1): "100"
-        - (row 2): "37"
+    Supports multiple formats:
+      1. Pipe-delimited markdown table (| N | label | value | ... |)
+      2. Cot A / Cot B numbered list structure
+      3. Sequential blocks: labels listed first, then values in same order
 
     Args:
         text: Raw text from Qwen3-VL model.
 
     Returns:
-        Vitals dict if markdown structure detected, None otherwise.
+        Vitals dict if structure detected, None otherwise.
     """
-    # Check if text contains the Cột A / Cột B structure
-    if not re.search(r"[Cc][oôộ]t\s*[AB]", text, re.IGNORECASE):
+    # Try pipe-delimited markdown table first
+    pipe_result = _parse_pipe_table(text)
+    if pipe_result is not None:
+        non_null = sum(1 for k, v in pipe_result.items()
+                       if k != "_units" and v is not None)
+        if non_null >= 1:
+            logger.debug("Pipe table parser matched %d field(s)", non_null)
+            return pipe_result
+
+    # Try Cot A / Cot B numbered list
+    if re.search(r"[Cc][oôộ]t\s*[AB]", text, re.IGNORECASE):
+        logger.debug("Qwen markdown structure detected")
+
+        col_a_rows = _extract_column_rows(text, "A")
+        col_b_rows = _extract_column_rows(text, "B")
+
+        if col_a_rows and col_b_rows:
+            logger.debug("Cot A rows: %s", col_a_rows)
+            logger.debug("Cot B rows: %s", col_b_rows)
+
+            vitals = {
+                "mach": None,
+                "nhiet_do": None,
+                "huyet_ap": None,
+                "nhip_tho": None,
+                "can_nang": None,
+                "chieu_cao": None,
+                "spo2": None,
+            }
+
+            for row_num, label in col_a_rows.items():
+                value_str = col_b_rows.get(row_num)
+                if value_str is None:
+                    continue
+
+                field = _fuzzy_map_label(label)
+                if field is None:
+                    logger.debug("Unmapped label: '%s' (row %d)", label, row_num)
+                    continue
+
+                parsed_value = _parse_field_value(field, value_str)
+                if parsed_value is not None:
+                    vitals[field] = parsed_value
+                    logger.debug("Qwen markdown: %s = %s (from '%s')", field, parsed_value, value_str)
+
+            non_null = sum(1 for k, v in vitals.items()
+                           if k != "_units" and v is not None)
+            if non_null >= 1:
+                return vitals
+
+    # Try sequential block parsing (labels block then values block)
+    seq_result = _parse_sequential_blocks(text)
+    if seq_result is not None:
+        non_null = sum(1 for k, v in seq_result.items()
+                       if k != "_units" and v is not None)
+        if non_null >= 1:
+            logger.debug("Sequential block parser matched %d field(s)", non_null)
+            return seq_result
+
+    return None
+
+
+def _parse_sequential_blocks(text: str) -> dict:
+    """Parse text where labels appear in sequence, followed by values in same order.
+
+    Handles format like:
+      Mach
+      Nhiet do
+      Huyet ap
+      ...
+      100
+      37
+      110/65
+      ...
+
+    Args:
+        text: Raw text from model.
+
+    Returns:
+        Vitals dict if sequential pattern detected, None otherwise.
+    """
+    lines = [l.strip() for l in text.split('\n') if l.strip()]
+
+    # Find lines that match known vital sign labels
+    label_indices = []
+    for i, line in enumerate(lines):
+        field = _fuzzy_map_label(line)
+        if field is not None:
+            label_indices.append((i, line, field))
+
+    # Need at least 3 consecutive-ish labels to consider this a valid block
+    if len(label_indices) < 3:
         return None
 
-    logger.debug("Qwen markdown structure detected")
+    # Check if labels are roughly consecutive (within a small gap)
+    first_label_idx = label_indices[0][0]
+    last_label_idx = label_indices[-1][0]
+    label_span = last_label_idx - first_label_idx + 1
 
-    # Extract rows from Cột A (labels)
-    col_a_rows = _extract_column_rows(text, "A")
-    # Extract rows from Cột B (values)
-    col_b_rows = _extract_column_rows(text, "B")
-
-    if not col_a_rows or not col_b_rows:
-        logger.debug("Could not extract column rows (A=%d, B=%d)",
-                     len(col_a_rows), len(col_b_rows))
+    # Labels should be within a reasonable span (allow some gaps for noise)
+    if label_span > len(label_indices) * 3:
         return None
 
-    logger.debug("Cột A rows: %s", col_a_rows)
-    logger.debug("Cột B rows: %s", col_b_rows)
+    # Look for value block after the labels
+    # Values should start after the last label
+    value_start = last_label_idx + 1
 
-    # Match by row number and map labels to fields
+    # Collect values: lines that look like numbers or BP patterns
+    value_lines = []
+    for i in range(value_start, len(lines)):
+        line = lines[i]
+        # Skip single letters, headers, noise
+        if re.match(r'^[a-zA-Z]{1,3}$', line) and not re.match(r'^\d', line):
+            continue
+        if re.match(r'^\d+([.,/]\d+)?$', line):
+            value_lines.append(line)
+        elif re.search(r'\d+/\d+', line):
+            value_lines.append(line)
+
+    if len(value_lines) < 3:
+        return None
+
+    # Match labels to values by position
     vitals = {
         "mach": None,
         "nhiet_do": None,
@@ -163,23 +267,132 @@ def parse_qwen_markdown(text: str) -> dict:
         "spo2": None,
     }
 
-    for row_num, label in col_a_rows.items():
-        value_str = col_b_rows.get(row_num)
-        if value_str is None:
+    found_any = False
+    for idx, (_, label, field) in enumerate(label_indices):
+        if idx >= len(value_lines):
+            break
+        value_str = value_lines[idx]
+        parsed_value = _parse_field_value(field, value_str)
+        if parsed_value is not None:
+            vitals[field] = parsed_value
+            found_any = True
+            logger.debug("Sequential: %s = %s (from '%s')", field, parsed_value, value_str)
+
+    return vitals if found_any else None
+
+
+def _parse_pipe_table(text: str) -> dict:
+    """Parse pipe-delimited markdown table format.
+
+    Handles formats like:
+      |  | A       | B      | C  |
+      |---|---------|--------|----|
+      | 1 | Mach    | 100    |    |
+
+    And also without leading/trailing pipes:
+      A | B | C
+      1 | Mach | 100
+
+    Args:
+        text: Raw text from model.
+
+    Returns:
+        Vitals dict if pipe table detected, None otherwise.
+    """
+    # Find lines containing pipe characters (at least 2 pipes = 3 columns)
+    lines = text.split('\n')
+    pipe_rows = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.count('|') >= 2:
+            pipe_rows.append(stripped)
+
+    if len(pipe_rows) < 3:
+        return None
+
+    # Parse each row into cells
+    data_rows = []
+    for row in pipe_rows:
+        # Strip leading/trailing pipes
+        row = row.strip('|')
+        cells = [c.strip() for c in row.split('|')]
+        # Skip separator rows (|---|---|---|)
+        if all(re.match(r'^-+$', c) or c == '' for c in cells):
+            continue
+        data_rows.append(cells)
+
+    if len(data_rows) < 2:
+        return None
+
+    # Detect column layout: find which columns contain labels and values
+    header = data_rows[0]
+    col_a_idx = None
+    col_b_idx = None
+
+    # Try to find columns by header names
+    for i, cell in enumerate(header):
+        cell_lower = cell.lower().strip()
+        if cell_lower == 'a':
+            col_a_idx = i
+        elif cell_lower == 'b':
+            col_b_idx = i
+
+    # If header has A and B, check if data rows have a leading row-number column
+    # that shifts the actual data by one position
+    if col_a_idx is not None and col_b_idx is not None:
+        # Check first data row: if cell at col_a_idx is a pure number,
+        # the table has a leading index column not in the header
+        if len(data_rows) > 1:
+            first_data = data_rows[1]
+            if (col_a_idx < len(first_data) and
+                    re.match(r'^\d+$', first_data[col_a_idx].strip())):
+                # Row numbers occupy col_a_idx, actual labels shifted right
+                col_a_idx += 1
+                col_b_idx += 1
+
+    # If no header detected, assume col 1 = label, col 2 = value
+    if col_a_idx is None or col_b_idx is None:
+        for row in data_rows[1:]:
+            non_empty = [(i, c) for i, c in enumerate(row) if c and not re.match(r'^\d+$', c)]
+            if len(non_empty) >= 2:
+                col_a_idx = non_empty[0][0]
+                col_b_idx = non_empty[1][0]
+                break
+        if col_a_idx is None:
+            return None
+
+    # Extract label-value pairs from data rows (skip header)
+    vitals = {
+        "mach": None,
+        "nhiet_do": None,
+        "huyet_ap": None,
+        "nhip_tho": None,
+        "can_nang": None,
+        "chieu_cao": None,
+        "spo2": None,
+    }
+
+    found_any = False
+    for row in data_rows[1:]:
+        if col_a_idx >= len(row) or col_b_idx >= len(row):
+            continue
+        label = row[col_a_idx].strip()
+        value_str = row[col_b_idx].strip()
+
+        if not label or not value_str:
             continue
 
         field = _fuzzy_map_label(label)
         if field is None:
-            logger.debug("Unmapped label: '%s' (row %d)", label, row_num)
             continue
 
-        # Parse value based on field type
         parsed_value = _parse_field_value(field, value_str)
         if parsed_value is not None:
             vitals[field] = parsed_value
-            logger.debug("Qwen markdown: %s = %s (from '%s')", field, parsed_value, value_str)
+            found_any = True
+            logger.debug("Pipe table: %s = %s (from '%s')", field, parsed_value, value_str)
 
-    return vitals
+    return vitals if found_any else None
 
 
 def _extract_column_rows(text: str, column: str) -> dict:
@@ -187,21 +400,22 @@ def _extract_column_rows(text: str, column: str) -> dict:
 
     Handles patterns like:
       - (row 1): "value"
-      - (row 2): "value"
+      - 1. value
+      - 1: value
 
     Args:
         text: Full markdown text.
         column: "A" or "B".
 
     Returns:
-        Dict mapping row_num (int) → value (str).
+        Dict mapping row_num (int) to value (str).
     """
     rows = {}
 
     # Find the section for this column
     # Match "Cột A", "Cot A", "cột A", etc.
     col_pattern = re.compile(
-        r"[Cc][oôộ]t\s*" + re.escape(column) + r".*?\n(.*?)(?=[Cc][oôộ]t\s*[A-Z]|\Z)",
+        r"[Cc][oôộ]t\s*" + re.escape(column) + r"[^:\n]*:?\s*\n(.*?)(?=[Cc][oôộ]t\s*[A-Z]|\Z)",
         re.DOTALL | re.IGNORECASE,
     )
     col_match = col_pattern.search(text)
@@ -210,20 +424,32 @@ def _extract_column_rows(text: str, column: str) -> dict:
 
     section = col_match.group(1)
 
-    # Try with quotes first (smart quotes or straight quotes)
+    # Strategy 1: (row N): "value" format
     for match in re.finditer(
-        r'\(row\s*(\d+)\)\s*:\s*[“””\']+([^“””\'\n]+)[“””\']+',
+        r'\(row\s*(\d+)\)\s*:\s*["""\']+(.*?)["""\']+',
         section, re.IGNORECASE,
     ):
         row_num = int(match.group(1))
         value = match.group(2).strip()
-        rows[row_num] = value
+        if value:
+            rows[row_num] = value
 
-    # If no quoted matches, try unquoted
+    # Strategy 2: numbered list "N. value" or "N: value" or "- (row N): value"
+    if not rows:
+        for match in re.finditer(
+            r'(?:^|\n)\s*(?:-\s*)?(\d+)[.):\s]+\s*(.+)',
+            section,
+        ):
+            row_num = int(match.group(1))
+            value = match.group(2).strip().strip('"""\'')
+            if value:
+                rows[row_num] = value
+
+    # Strategy 3: unquoted (row N): value
     if not rows:
         for match in re.finditer(r'\(row\s*(\d+)\)\s*:\s*(.+)', section, re.IGNORECASE):
             row_num = int(match.group(1))
-            value = match.group(2).strip().strip('“””\'')
+            value = match.group(2).strip().strip('"""\'')
             if value:
                 rows[row_num] = value
 

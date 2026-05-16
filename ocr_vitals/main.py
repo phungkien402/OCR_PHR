@@ -50,10 +50,26 @@ def process_image(image_path: str, device: str, mode: str = "auto") -> dict:
                                     image_path=image_path)
             ocr_engine_used = "qwen3_vl_2b_ollama"
         else:
-            # VietOCR needs preprocessed image
-            preprocessed = preprocess_image(image_path)
-            raw_text = extract_text(preprocessed, device=device, mode="handwritten")
-            ocr_engine_used = "vietocr_vgg_transformer"
+            # Handwritten: try Qwen3-VL first, fall back to VietOCR
+            from .ocr_engine import _extract_text_qwen3_vl_generic
+            from .parser import parse_qwen_markdown
+
+            # Try Qwen3-VL with generic prompt
+            qwen_text = _extract_text_qwen3_vl_generic(raw_img)
+            qwen_vitals = None
+            if qwen_text:
+                qwen_vitals = parse_qwen_markdown(qwen_text)
+
+            if qwen_vitals and sum(1 for k, v in qwen_vitals.items()
+                                    if k != "_units" and v is not None) >= 1:
+                # Qwen3-VL succeeded
+                raw_text = qwen_text
+                ocr_engine_used = "qwen3_vl_4b_ollama"
+            else:
+                # Fall back to VietOCR
+                preprocessed = preprocess_image(image_path)
+                raw_text = extract_text(preprocessed, device=device, mode="handwritten")
+                ocr_engine_used = "vietocr_vgg_transformer"
 
         logger.info("OCR extracted text length: %d chars", len(raw_text))
 

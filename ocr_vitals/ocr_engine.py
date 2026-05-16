@@ -207,7 +207,7 @@ def _extract_text_lcd(image: np.ndarray, image_path: str = None) -> str:
 
 
 def _extract_text_qwen3_vl(image: np.ndarray) -> str:
-    """Send image to Qwen3-VL:2b via Ollama for LCD digit recognition.
+    """Send image to Qwen3-VL:4b via Ollama for LCD digit recognition.
 
     Args:
         image: BGR image as numpy array.
@@ -243,6 +243,57 @@ def _extract_text_qwen3_vl(image: np.ndarray) -> str:
         "PUL: <number>"
     )
 
+    return _call_ollama(img_b64, prompt)
+
+
+def _extract_text_qwen3_vl_generic(image: np.ndarray) -> str:
+    """Send image to Qwen3-VL:4b via Ollama with a generic read-all prompt.
+
+    Used for handwritten/tabular images where the LCD-specific prompt
+    would not work.
+
+    Args:
+        image: BGR or grayscale image as numpy array.
+
+    Returns:
+        Extracted text string, or empty string if Ollama is unavailable.
+    """
+    import base64
+
+    # Ensure BGR format for encoding
+    if len(image.shape) == 2:
+        bgr_image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    else:
+        bgr_image = image
+
+    success, img_encoded = cv2.imencode(".png", bgr_image)
+    if not success:
+        logger.error("Failed to encode image for Ollama")
+        return ""
+
+    img_b64 = base64.b64encode(img_encoded.tobytes()).decode()
+
+    prompt = "What text do you see in this image? List everything you can read."
+
+    return _call_ollama(img_b64, prompt)
+
+
+def _call_ollama(img_b64: str, prompt: str) -> str:
+    """Send a request to Ollama API with an image and prompt.
+
+    Args:
+        img_b64: Base64-encoded image string.
+        prompt: Text prompt for the model.
+
+    Returns:
+        Model response text, or empty string on failure.
+    """
+    try:
+        import requests
+    except ImportError:
+        logger.warning("requests library not available for Ollama API")
+        return ""
+
     payload = {
         "model": OLLAMA_MODEL,
         "messages": [{
@@ -257,7 +308,7 @@ def _extract_text_qwen3_vl(image: np.ndarray) -> str:
         resp = requests.post(OLLAMA_ENDPOINT, json=payload, timeout=120)
         resp.raise_for_status()
         content = resp.json()["message"]["content"]
-        logger.info("Qwen3-VL raw response: %s", repr(content))
+        logger.info("Qwen3-VL raw response: %s", repr(content[:200]))
         return content
     except requests.exceptions.ConnectionError:
         logger.warning("Ollama not running at %s", OLLAMA_ENDPOINT)
