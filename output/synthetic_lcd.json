@@ -1,6 +1,6 @@
 {
-  "source_image": "may-do-huyet-ap-bap-tay-d2group-kf-65a.png",
-  "ocr_raw_text": "SYS: 128\nDIA: 78\nPUL: 72",
+  "source_image": "synthetic_lcd.png",
+  "ocr_raw_text": "SYS\n128\nmmhg\nDIA\n78\nmmhg\nPUL\n72\n/min",
   "vitals": {
     "mach": 72,
     "nhiet_do": null,
@@ -96,6 +96,11 @@
     "chieu_cao",
     "spo2"
   ],
-  "ocr_engine": "qwen3_vl_2b_ollama",
-  "processed_at": "2026-05-16T18:24:43"
+  "ocr_engine": "vietocr_vgg_transformer",
+  "processed_at": "2026-05-16T18:24:46",
+  "units_detected": [
+    "min",
+    "/min",
+    "mmhg"
+  ]
 }

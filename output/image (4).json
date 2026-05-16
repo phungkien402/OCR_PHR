@@ -1,13 +1,10 @@
 {
-  "source_image": "may-do-huyet-ap-bap-tay-d2group-kf-65a.png",
-  "ocr_raw_text": "SYS: 128\nDIA: 78\nPUL: 72",
+  "source_image": "image (4).png",
+  "ocr_raw_text": "PY\n40\nL\nĐẾM\n19",
   "vitals": {
-    "mach": 72,
+    "mach": null,
     "nhiet_do": null,
-    "huyet_ap": {
-      "tam_thu": 128,
-      "tam_truong": 78
-    },
+    "huyet_ap": null,
     "nhip_tho": null,
     "can_nang": null,
     "chieu_cao": null,
@@ -22,7 +19,7 @@
         60,
         100
       ],
-      "value": 72
+      "value": null
     },
     "nhiet_do": {
       "label_vn": "Nhiệt độ",
@@ -48,10 +45,7 @@
           80
         ]
       },
-      "value": {
-        "tam_thu": 128,
-        "tam_truong": 78
-      }
+      "value": null
     },
     "nhip_tho": {
       "label_vn": "Nhịp thở",
@@ -90,12 +84,14 @@
   },
   "validation": {},
   "missing_fields": [
+    "mach",
     "nhiet_do",
+    "huyet_ap",
     "nhip_tho",
     "can_nang",
     "chieu_cao",
     "spo2"
   ],
-  "ocr_engine": "qwen3_vl_2b_ollama",
-  "processed_at": "2026-05-16T18:24:43"
+  "ocr_engine": "vietocr_vgg_transformer",
+  "processed_at": "2026-05-16T18:24:40"
 }

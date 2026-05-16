@@ -1,6 +1,6 @@
 {
   "source_image": "bp_monitor_lcd.png",
-  "ocr_raw_text": "SYS\n\n128 mmHg\nDIA\n\n78 mmHg\nPUL\n\n72 PUL/min",
+  "ocr_raw_text": "SYS: 128\nDIA: 78\nPUL: 72",
   "vitals": {
     "mach": 72,
     "nhiet_do": null,
@@ -13,6 +13,81 @@
     "chieu_cao": null,
     "spo2": null
   },
+  "fields_meta": {
+    "mach": {
+      "label_vn": "Mạch",
+      "label_en": "Pulse / Heart Rate",
+      "unit": "lần/phút",
+      "normal_range": [
+        60,
+        100
+      ],
+      "value": 72
+    },
+    "nhiet_do": {
+      "label_vn": "Nhiệt độ",
+      "label_en": "Temperature",
+      "unit": "°C",
+      "normal_range": [
+        36.1,
+        37.2
+      ],
+      "value": null
+    },
+    "huyet_ap": {
+      "label_vn": "Huyết áp",
+      "label_en": "Blood Pressure (SYS/DIA)",
+      "unit": "mmHg",
+      "normal_range": {
+        "tam_thu": [
+          90,
+          120
+        ],
+        "tam_truong": [
+          60,
+          80
+        ]
+      },
+      "value": {
+        "tam_thu": 128,
+        "tam_truong": 78
+      }
+    },
+    "nhip_tho": {
+      "label_vn": "Nhịp thở",
+      "label_en": "Respiratory Rate",
+      "unit": "lần/phút",
+      "normal_range": [
+        12,
+        20
+      ],
+      "value": null
+    },
+    "can_nang": {
+      "label_vn": "Cân nặng",
+      "label_en": "Weight",
+      "unit": "kg",
+      "normal_range": null,
+      "value": null
+    },
+    "chieu_cao": {
+      "label_vn": "Chiều cao",
+      "label_en": "Height",
+      "unit": "cm",
+      "normal_range": null,
+      "value": null
+    },
+    "spo2": {
+      "label_vn": "SpO2",
+      "label_en": "Oxygen Saturation",
+      "unit": "%",
+      "normal_range": [
+        95,
+        100
+      ],
+      "value": null
+    }
+  },
   "validation": {},
   "missing_fields": [
     "nhiet_do",
@@ -21,11 +96,6 @@
     "chieu_cao",
     "spo2"
   ],
-  "ocr_engine": "tesseract_eng",
-  "processed_at": "2026-05-16T13:09:49",
-  "units_detected": [
-    "mmhg",
-    "min",
-    "/min"
-  ]
+  "ocr_engine": "qwen3_vl_2b_ollama",
+  "processed_at": "2026-05-16T18:24:35"
 }

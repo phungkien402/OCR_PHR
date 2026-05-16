@@ -1,12 +1,12 @@
 {
-  "source_image": "may-do-huyet-ap-bap-tay-d2group-kf-65a.png",
-  "ocr_raw_text": "SYS: 128\nDIA: 78\nPUL: 72",
+  "source_image": "Diona-ptient-monitor.png",
+  "ocr_raw_text": "SYS: 111\nDIA: 73\nPUL: 38",
   "vitals": {
-    "mach": 72,
+    "mach": 38,
     "nhiet_do": null,
     "huyet_ap": {
-      "tam_thu": 128,
-      "tam_truong": 78
+      "tam_thu": 111,
+      "tam_truong": 73
     },
     "nhip_tho": null,
     "can_nang": null,
@@ -22,7 +22,7 @@
         60,
         100
       ],
-      "value": 72
+      "value": 38
     },
     "nhiet_do": {
       "label_vn": "Nhiệt độ",
@@ -49,8 +49,8 @@
         ]
       },
       "value": {
-        "tam_thu": 128,
-        "tam_truong": 78
+        "tam_thu": 111,
+        "tam_truong": 73
       }
     },
     "nhip_tho": {
@@ -97,5 +97,5 @@
     "spo2"
   ],
   "ocr_engine": "qwen3_vl_2b_ollama",
-  "processed_at": "2026-05-16T18:24:43"
+  "processed_at": "2026-05-16T18:24:33"
 }

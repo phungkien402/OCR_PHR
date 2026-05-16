@@ -1,5 +1,5 @@
 {
-  "source_image": "may-do-huyet-ap-bap-tay-d2group-kf-65a.png",
+  "source_image": "AAA.jpg",
   "ocr_raw_text": "SYS: 128\nDIA: 78\nPUL: 72",
   "vitals": {
     "mach": 72,
@@ -97,5 +97,5 @@
     "spo2"
   ],
   "ocr_engine": "qwen3_vl_2b_ollama",
-  "processed_at": "2026-05-16T18:24:43"
+  "processed_at": "2026-05-16T18:24:23"
 }
