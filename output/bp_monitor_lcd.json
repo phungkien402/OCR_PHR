@@ -1,0 +1,31 @@
+{
+  "source_image": "bp_monitor_lcd.png",
+  "ocr_raw_text": "SYS\n\n128 mmHg\nDIA\n\n78 mmHg\nPUL\n\n72 PUL/min",
+  "vitals": {
+    "mach": 72,
+    "nhiet_do": null,
+    "huyet_ap": {
+      "tam_thu": 128,
+      "tam_truong": 78
+    },
+    "nhip_tho": null,
+    "can_nang": null,
+    "chieu_cao": null,
+    "spo2": null
+  },
+  "validation": {},
+  "missing_fields": [
+    "nhiet_do",
+    "nhip_tho",
+    "can_nang",
+    "chieu_cao",
+    "spo2"
+  ],
+  "ocr_engine": "tesseract_eng",
+  "processed_at": "2026-05-16T13:09:49",
+  "units_detected": [
+    "mmhg",
+    "min",
+    "/min"
+  ]
+}

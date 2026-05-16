@@ -1,0 +1,31 @@
+{
+  "source_image": "may-do-huyet-ap-bap-tay-d2group-kf-65a.png",
+  "ocr_raw_text": "Presous\n\nSYS\n\nkPa\n\nDIA\n\nmmHg\n\nY\n\nPUL\n\nPUL/min\n\nD2-65A\n\nON\n\nOFF",
+  "vitals": {
+    "mach": null,
+    "nhiet_do": null,
+    "huyet_ap": null,
+    "nhip_tho": null,
+    "can_nang": null,
+    "chieu_cao": null,
+    "spo2": null
+  },
+  "validation": {},
+  "missing_fields": [
+    "mach",
+    "nhiet_do",
+    "huyet_ap",
+    "nhip_tho",
+    "can_nang",
+    "chieu_cao",
+    "spo2"
+  ],
+  "ocr_engine": "tesseract_eng",
+  "processed_at": "2026-05-16T12:56:44",
+  "units_detected": [
+    "min",
+    "/min",
+    "kpa",
+    "mmhg"
+  ]
+}
