@@ -4,13 +4,13 @@ Ground truth: SYS=128, DIA=78, PUL=72
 ================================================================================
 Engine                              |   SYS |   DIA |   PUL | Score |    Time | Error
 ------------------------------------+-------+-------+-------+-------+---------+------
-1. Tesseract default (PSM 6/11/3)   |     - |     - |    65 |     0 |   2.02s | 
-2. Tesseract digit whitelist        |     - |     - |     - |     0 |   1.17s | 
-3. PaddleOCR                        |     - |     - |     - |     0 |   4.02s | (Unimplemented) ConvertPirAttr
-4. EasyOCR                          |    78 |     - |    99 |     0 |   3.72s | 
-5. TrOCR (printed)                  |     - |     - |     - |     0 |  10.07s | 
+1. Tesseract default (PSM 6/11/3)   |     - |     - |    65 |     0 |   1.98s | 
+2. Tesseract digit whitelist        |     - |     - |     - |     0 |   1.14s | 
+3. PaddleOCR                        |     - |     - |     - |     0 |   4.17s | (Unimplemented) ConvertPirAttr
+4. EasyOCR                          |     - |     - |     - |     0 |   3.11s | NCCL Error 1: unhandled cuda e
+5. TrOCR (printed)                  |     - |     - |     - |     0 |  10.00s | 
 6. Surya OCR                        |     - |     - |     - |     0 |   0.00s | not installed
-7. OpenCV contour + Tesseract       |     - |     - |     - |     0 |   5.26s | 
+7. OpenCV contour + Tesseract       |     - |     - |     - |     0 |   5.22s | 
 ================================================================================
 
 
@@ -45,15 +45,8 @@ Error: (Unimplemented) ConvertPirAttribute2RuntimeAttribute not support [pir::Ar
 
 
 --- 4. EasyOCR ---
-Raw: Zcroue (0.37)
-K (0.01)
-SYS (1.00)
-78 (0.16)
-kPa (1.00)
-DIA (1.00)
-mmHg (1.00)
-PUL (1.00)
-PULImin (0.
+Raw: 
+Error: NCCL Error 1: unhandled cuda error (run with NCCL_DEBUG=INFO for details)
 
 --- 5. TrOCR (printed) ---
 Raw: 0.00
@@ -65,24 +58,3 @@ Error: not installed
 
 --- 7. OpenCV contour + Tesseract ---
 Raw: 
-
-
-================================================================================
-ADDITIONAL TEST: Synthetic LCD image (bp_monitor_lcd.png)
-Ground truth: SYS=128, DIA=78, PUL=72
-================================================================================
-Engine                              |   SYS |   DIA |   PUL | Score |    Time
-------------------------------------+-------+-------+-------+-------+--------
-Tesseract (binary>50, PSM 11)       |   128✓|    78✓|    72✓|   3/3 |   0.23s
-EasyOCR                             |   128✓|    78✓|    72✓|   3/3 |   0.64s
-================================================================================
-
-CONCLUSION:
-- The product image (may-do-huyet-ap-bap-tay-d2group-kf-65a.png) is a marketing
-  photo with the LCD screen OFF — no actual digit readings are displayed.
-  No OCR engine can extract digits that do not exist in the image.
-- When actual LCD digits ARE present (synthetic test), both Tesseract and
-  EasyOCR achieve perfect 3/3 scores.
-- Tesseract with binary threshold >50 + PSM 11 is the fastest (0.23s) and
-  most reliable for LCD 7-segment digit extraction.
-- The pipeline correctly uses Tesseract for LCD mode and extracts all values.
