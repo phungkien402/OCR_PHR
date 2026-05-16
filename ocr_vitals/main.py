@@ -9,9 +9,9 @@ from datetime import datetime
 from pathlib import Path
 
 from .config import DEVICE
-from .ocr_engine import extract_text, detect_image_mode
+from .ocr_engine import extract_text
 from .parser import parse_vitals
-from .preprocessor import preprocess_image, preprocess_image_raw
+from .preprocessor import preprocess_image_raw
 from .validator import validate_vitals
 
 logger = logging.getLogger(__name__)
@@ -22,54 +22,31 @@ SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp
 def process_image(image_path: str, device: str, mode: str = "auto") -> dict:
     """Process a single image and extract vital signs.
 
+    Uses a single unified Qwen3-VL call for all image types.
+    Falls back to VietOCR only if Ollama is unavailable.
+
     Args:
         image_path: Path to the input image.
         device: Device for OCR inference.
-        mode: OCR mode - "lcd", "handwritten", or "auto".
+        mode: Ignored — kept for API compatibility.
 
     Returns:
         Result dictionary with extracted vitals and metadata.
     """
     filename = os.path.basename(image_path)
-    logger.info("Processing image: %s (mode=%s)", filename, mode)
+    logger.info("Processing image: %s", filename)
 
     try:
-        # Step 1: Load raw image for detection and LCD OCR
+        # Step 1: Load raw image
         raw_img = preprocess_image_raw(image_path)
 
-        # Step 2: Determine OCR mode
-        if mode == "auto":
-            detected_mode = detect_image_mode(raw_img)
-        else:
-            detected_mode = mode
+        # Step 2: Single unified OCR call — Qwen3-VL handles all image types
+        raw_text = extract_text(raw_img, device=device)
+        ocr_engine_used = "qwen3_vl_4b_ollama"
 
-        # Step 3: OCR based on detected mode
-        if detected_mode == "lcd":
-            # Qwen3-VL via Ollama with screen warp preprocessing
-            raw_text = extract_text(raw_img, device=device, mode="lcd",
-                                    image_path=image_path)
-            ocr_engine_used = "qwen3_vl_2b_ollama"
-        else:
-            # Handwritten: try Qwen3-VL first, fall back to VietOCR
-            from .ocr_engine import _extract_text_qwen3_vl_generic
-            from .parser import parse_qwen_markdown
-
-            # Try Qwen3-VL with generic prompt
-            qwen_text = _extract_text_qwen3_vl_generic(raw_img)
-            qwen_vitals = None
-            if qwen_text:
-                qwen_vitals = parse_qwen_markdown(qwen_text)
-
-            if qwen_vitals and sum(1 for k, v in qwen_vitals.items()
-                                    if k != "_units" and v is not None) >= 1:
-                # Qwen3-VL succeeded
-                raw_text = qwen_text
-                ocr_engine_used = "qwen3_vl_4b_ollama"
-            else:
-                # Fall back to VietOCR
-                preprocessed = preprocess_image(image_path)
-                raw_text = extract_text(preprocessed, device=device, mode="handwritten")
-                ocr_engine_used = "vietocr_vgg_transformer"
+        # Check if VietOCR fallback was used (empty from Qwen means fallback triggered)
+        if not raw_text:
+            raw_text = ""
 
         logger.info("OCR extracted text length: %d chars", len(raw_text))
 
@@ -87,14 +64,13 @@ def process_image(image_path: str, device: str, mode: str = "auto") -> dict:
         fields_meta = {}
         for field, info in VITALS_INFO.items():
             value = vitals.get(field)
-            meta = {
+            fields_meta[field] = {
                 "label_vn": info["label_vn"],
                 "label_en": info["label_en"],
                 "unit": info["unit"],
                 "normal_range": info["normal_range"],
                 "value": value,
             }
-            fields_meta[field] = meta
 
         result = {
             "source_image": filename,

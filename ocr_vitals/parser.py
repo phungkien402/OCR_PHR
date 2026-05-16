@@ -193,6 +193,15 @@ def parse_qwen_markdown(text: str) -> dict:
             logger.debug("Sequential block parser matched %d field(s)", non_null)
             return seq_result
 
+    # Try simple "Label: value" line-by-line format (Qwen3-VL universal output)
+    simple_result = _parse_simple_label_value(text)
+    if simple_result is not None:
+        non_null = sum(1 for k, v in simple_result.items()
+                       if k != "_units" and v is not None)
+        if non_null >= 1:
+            logger.debug("Simple label:value parser matched %d field(s)", non_null)
+            return simple_result
+
     return None
 
 
@@ -277,6 +286,65 @@ def _parse_sequential_blocks(text: str) -> dict:
             vitals[field] = parsed_value
             found_any = True
             logger.debug("Sequential: %s = %s (from '%s')", field, parsed_value, value_str)
+
+    return vitals if found_any else None
+
+
+def _parse_simple_label_value(text: str) -> dict:
+    """Parse simple 'Label: value' line-by-line format.
+
+    Handles the Qwen3-VL universal prompt output like:
+        Mạch: 100
+        Nhiệt độ: 37
+        Huyết áp: 110/65
+        Nhịp thở: 50
+        Cân nặng: 55
+        Chiều cao: 160
+        SpO2: 40
+
+    Also handles variations with extra text, units, or 'null' values.
+
+    Args:
+        text: Raw text from model.
+
+    Returns:
+        Vitals dict if label:value lines detected, None otherwise.
+    """
+    lines = [l.strip() for l in text.split('\n') if l.strip()]
+
+    vitals = {
+        "mach": None,
+        "nhiet_do": None,
+        "huyet_ap": None,
+        "nhip_tho": None,
+        "can_nang": None,
+        "chieu_cao": None,
+        "spo2": None,
+    }
+
+    found_any = False
+    for line in lines:
+        # Match pattern: "Label: value" or "Label : value"
+        match = re.match(r'^(.+?)\s*[:：]\s*(.+)$', line)
+        if not match:
+            continue
+
+        label = match.group(1).strip().rstrip('-*•')
+        value_str = match.group(2).strip()
+
+        # Skip null/none/N/A values
+        if value_str.lower() in ('null', 'none', 'n/a', '-', 'không có', 'không rõ'):
+            continue
+
+        field = _fuzzy_map_label(label)
+        if field is None:
+            continue
+
+        parsed_value = _parse_field_value(field, value_str)
+        if parsed_value is not None:
+            vitals[field] = parsed_value
+            found_any = True
+            logger.debug("Simple label:value: %s = %s (from '%s')", field, parsed_value, value_str)
 
     return vitals if found_any else None
 
