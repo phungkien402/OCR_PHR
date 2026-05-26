@@ -1,4 +1,7 @@
-"""Main entry point for OCR vital signs extraction pipeline."""
+"""Main entry point for OCR vital signs extraction pipeline.
+
+Adds process_image_async() for non-blocking use in FastAPI endpoints.
+"""
 
 import argparse
 import json
@@ -9,219 +12,152 @@ from datetime import datetime
 from pathlib import Path
 
 from .config import DEVICE
-from .ocr_engine import extract_text
+from .ocr_engine import extract_text, extract_text_async, OLLAMA_MODEL
 from .parser import parse_vitals
-from .preprocessor import preprocess_image_raw
+from .preprocessor import preprocess_for_vlm, preprocess_image_raw
 from .validator import validate_vitals
 
 logger = logging.getLogger(__name__)
-
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp"}
 
 
-def process_image(image_path: str, device: str, mode: str = "auto") -> dict:
-    """Process a single image and extract vital signs.
+# ─────────────────────────────────────────────
+# Core pipeline (sync — for CLI)
+# ─────────────────────────────────────────────
 
-    Uses a single unified Qwen3-VL call for all image types.
-    Falls back to VietOCR only if Ollama is unavailable.
-
-    Args:
-        image_path: Path to the input image.
-        device: Device for OCR inference.
-        mode: Ignored — kept for API compatibility.
-
-    Returns:
-        Result dictionary with extracted vitals and metadata.
-    """
+def process_image(image_path: str, device: str = "cuda:0", mode: str = "auto") -> dict:
+    """Sync pipeline — for CLI usage."""
     filename = os.path.basename(image_path)
-    logger.info("Processing image: %s", filename)
-
     try:
-        # Step 1: Load raw image
-        raw_img = preprocess_image_raw(image_path)
-
-        # Step 2: Single unified OCR call — Qwen3-VL handles all image types
+        raw_img = preprocess_for_vlm(image_path)
         raw_text = extract_text(raw_img, device=device)
-        ocr_engine_used = "qwen3_vl_4b_ollama"
-
-        # Check if VietOCR fallback was used (empty from Qwen means fallback triggered)
-        if not raw_text:
-            raw_text = ""
-
-        logger.info("OCR extracted text length: %d chars", len(raw_text))
-
-        # Step 3: Parse vitals
-        vitals = parse_vitals(raw_text)
-
-        # Remove internal metadata before output
-        units = vitals.pop("_units", None)
-
-        # Step 4: Validate
-        validation, missing_fields = validate_vitals(vitals)
-
-        # Step 5: Build field metadata with Vietnamese names, units, ranges
-        from .config import VITALS_INFO
-        fields_meta = {}
-        for field, info in VITALS_INFO.items():
-            value = vitals.get(field)
-            fields_meta[field] = {
-                "label_vn": info["label_vn"],
-                "label_en": info["label_en"],
-                "unit": info["unit"],
-                "normal_range": info["normal_range"],
-                "value": value,
-            }
-
-        result = {
-            "source_image": filename,
-            "ocr_raw_text": raw_text,
-            "vitals": vitals,
-            "fields_meta": fields_meta,
-            "validation": validation,
-            "missing_fields": missing_fields,
-            "ocr_engine": ocr_engine_used,
-            "processed_at": datetime.now().isoformat(timespec="seconds"),
-        }
-
-        if units:
-            result["units_detected"] = units
-
+        return _build_result(filename, raw_text)
     except Exception as e:
         logger.error("Error processing %s: %s", filename, e)
-        result = {
-            "source_image": filename,
-            "error": str(e),
-            "ocr_engine": "unknown",
-            "processed_at": datetime.now().isoformat(timespec="seconds"),
-        }
+        return _error_result(filename, str(e))
 
+
+# ─────────────────────────────────────────────
+# Async pipeline (for FastAPI)
+# ─────────────────────────────────────────────
+
+async def process_image_async(image_path: str, device: str = "cuda:0") -> dict:
+    """Async pipeline — use in FastAPI endpoints to avoid blocking.
+
+    Uses httpx for the Ollama call so the event loop stays free.
+    """
+    filename = os.path.basename(image_path)
+    try:
+        raw_img = preprocess_for_vlm(image_path)
+        raw_text = await extract_text_async(raw_img, device=device)
+        return _build_result(filename, raw_text)
+    except Exception as e:
+        logger.error("Error processing %s: %s", filename, e)
+        return _error_result(filename, str(e))
+
+
+# ─────────────────────────────────────────────
+# Shared helpers
+# ─────────────────────────────────────────────
+
+def _build_result(filename: str, raw_text: str) -> dict:
+    """Parse raw OCR text into a full result dict."""
+    from .config import VITALS_INFO
+
+    vitals = parse_vitals(raw_text)
+    units = vitals.pop("_units", None)
+    validation, missing_fields = validate_vitals(vitals)
+
+    fields_meta = {
+        field: {
+            "label_vn": info["label_vn"],
+            "label_en": info["label_en"],
+            "unit": info["unit"],
+            "normal_range": info["normal_range"],
+            "value": vitals.get(field),
+        }
+        for field, info in VITALS_INFO.items()
+    }
+
+    result = {
+        "source_image": filename,
+        "ocr_raw_text": raw_text,
+        "vitals": vitals,
+        "fields_meta": fields_meta,
+        "validation": validation,
+        "missing_fields": missing_fields,
+        "ocr_engine": _detect_engine(),
+        "processed_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    if units:
+        result["units_detected"] = units
     return result
 
 
+def _detect_engine() -> str:
+    return f"ollama/{OLLAMA_MODEL}"
+
+
+def _error_result(filename: str, error: str) -> dict:
+    return {
+        "source_image": filename,
+        "error": error,
+        "ocr_engine": "unknown",
+        "processed_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+# ─────────────────────────────────────────────
+# CLI
+# ─────────────────────────────────────────────
+
 def save_result(result: dict, output_dir: str):
-    """Save result dictionary as JSON file.
-
-    Args:
-        result: Result dictionary to save.
-        output_dir: Output directory path.
-    """
     source = result.get("source_image", "unknown")
-    json_filename = f"{Path(source).stem}.json"
-    output_path = os.path.join(output_dir, json_filename)
-
-    with open(output_path, "w", encoding="utf-8") as f:
+    out_path = os.path.join(output_dir, f"{Path(source).stem}.json")
+    with open(out_path, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
-
-    logger.info("Saved result to: %s", output_path)
+    logger.info("Saved: %s", out_path)
 
 
 def get_image_files(input_path: str) -> list:
-    """Get list of image files from input path.
-
-    Args:
-        input_path: Path to a single image or directory.
-
-    Returns:
-        List of image file paths.
-    """
     input_path = os.path.abspath(input_path)
-
     if os.path.isfile(input_path):
-        ext = Path(input_path).suffix.lower()
-        if ext in SUPPORTED_EXTENSIONS:
-            return [input_path]
-        else:
-            logger.warning("Unsupported file extension: %s", ext)
-            return []
-
-    elif os.path.isdir(input_path):
-        files = []
-        for entry in sorted(os.listdir(input_path)):
-            filepath = os.path.join(input_path, entry)
-            if os.path.isfile(filepath):
-                ext = Path(filepath).suffix.lower()
-                if ext in SUPPORTED_EXTENSIONS:
-                    files.append(filepath)
-        logger.info("Found %d image(s) in directory: %s", len(files), input_path)
-        return files
-
-    else:
-        logger.error("Input path does not exist: %s", input_path)
-        return []
+        return [input_path] if Path(input_path).suffix.lower() in SUPPORTED_EXTENSIONS else []
+    if os.path.isdir(input_path):
+        return sorted(
+            os.path.join(input_path, f) for f in os.listdir(input_path)
+            if Path(f).suffix.lower() in SUPPORTED_EXTENSIONS
+        )
+    return []
 
 
 def main():
-    """CLI entry point."""
-    parser = argparse.ArgumentParser(
-        description="Extract vital signs from medical images using OCR"
-    )
-    parser.add_argument(
-        "--input", "-i",
-        required=True,
-        help="Path to input image or directory of images",
-    )
-    parser.add_argument(
-        "--output", "-o",
-        required=True,
-        help="Output directory for JSON results",
-    )
-    parser.add_argument(
-        "--device", "-d",
-        default=DEVICE,
-        help=f"Device for OCR inference (default: {DEVICE})",
-    )
-    parser.add_argument(
-        "--mode", "-m",
-        choices=["auto", "lcd", "handwritten"],
-        default="auto",
-        help="OCR mode: lcd (EasyOCR for digital displays), "
-             "handwritten (VietOCR for Vietnamese text), "
-             "auto (detect automatically, default)",
-    )
-    parser.add_argument(
-        "--verbose", "-v",
-        action="store_true",
-        help="Enable verbose (DEBUG) logging",
-    )
-
+    parser = argparse.ArgumentParser(description="Extract vital signs from medical images")
+    parser.add_argument("--input", "-i", required=True)
+    parser.add_argument("--output", "-o", required=True)
+    parser.add_argument("--device", "-d", default=DEVICE)
+    parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
 
-    # Configure logging
-    log_level = logging.DEBUG if args.verbose else logging.INFO
     logging.basicConfig(
-        level=log_level,
+        level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
     )
-
-    # Ensure output directory exists
     os.makedirs(args.output, exist_ok=True)
-
-    # Get image files
-    image_files = get_image_files(args.input)
-    if not image_files:
-        logger.warning("No images found to process")
+    files = get_image_files(args.input)
+    if not files:
+        logger.warning("No images found")
         sys.exit(0)
 
-    logger.info("Processing %d image(s) on device: %s (mode: %s)", len(image_files), args.device, args.mode)
-
-    # Process each image
-    success_count = 0
-    error_count = 0
-
-    for image_path in image_files:
-        result = process_image(image_path, device=args.device, mode=args.mode)
+    ok = err = 0
+    for path in files:
+        result = process_image(path, device=args.device)
         save_result(result, args.output)
-
         if "error" in result:
-            error_count += 1
+            err += 1
         else:
-            success_count += 1
-
-    logger.info(
-        "Done. Processed: %d, Errors: %d, Total: %d",
-        success_count, error_count, len(image_files),
-    )
+            ok += 1
+    logger.info("Done. OK=%d  Error=%d", ok, err)
 
 
 if __name__ == "__main__":

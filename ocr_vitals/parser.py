@@ -1,5 +1,13 @@
-"""Regex-based parser for extracting vital signs from OCR text."""
+"""Parser for vital signs extracted by OCR engine.
 
+Priority order:
+  1. JSON parse (new primary path — Qwen3-VL outputs JSON directly)
+  2. Simple "Label: value" line-by-line (legacy Qwen3 text format)
+  3. LCD label parsing (SYS/DIA/PUL patterns)
+  4. Vietnamese keyword regex (last resort)
+"""
+
+import json
 import logging
 import re
 import unicodedata
@@ -8,990 +16,341 @@ from .config import FIELD_KEYWORDS
 
 logger = logging.getLogger(__name__)
 
-# English labels commonly found on LCD blood pressure monitors
+# English LCD labels
 LCD_LABELS = {
-    "sys": "huyet_ap.tam_thu",
-    "systolic": "huyet_ap.tam_thu",
-    "dia": "huyet_ap.tam_truong",
-    "diastolic": "huyet_ap.tam_truong",
-    "pul": "mach",
-    "pulse": "mach",
-    "pul/min": "mach",
-    "pulse/min": "mach",
+    "sys": "huyet_ap.tam_thu", "systolic": "huyet_ap.tam_thu",
+    "dia": "huyet_ap.tam_truong", "diastolic": "huyet_ap.tam_truong",
+    "pul": "mach", "pulse": "mach", "pul/min": "mach", "pulse/min": "mach",
+}
+UNIT_LABELS = {"mmhg", "kpa", "bpm", "/min", "min"}
+
+# Fuzzy label → field map
+_LABEL_MAP = {
+    "mach": "mach", "mạch": "mach", "pulse": "mach", "hr": "mach", "heart rate": "mach",
+    "nhiet do": "nhiet_do", "nhiệt độ": "nhiet_do", "temp": "nhiet_do", "temperature": "nhiet_do",
+    "huyet ap": "huyet_ap", "huyết áp": "huyet_ap", "blood pressure": "huyet_ap", "bp": "huyet_ap", "ha": "huyet_ap",
+    "nhip tho": "nhip_tho", "nhịp thở": "nhip_tho", "respiratory rate": "nhip_tho", "rr": "nhip_tho",
+    "can nang": "can_nang", "cân nặng": "can_nang", "weight": "can_nang",
+    "chieu cao": "chieu_cao", "chiều cao": "chieu_cao", "height": "chieu_cao",
+    "spo2": "spo2", "sp02": "spo2", "o2": "spo2",
 }
 
-# Unit labels to capture as metadata (not affecting values)
-UNIT_LABELS = {"mmhg", "kpa", "bpm", "/min", "min"}
+_EMPTY_VITALS = {
+    "mach": None, "nhiet_do": None, "huyet_ap": None,
+    "nhip_tho": None, "can_nang": None, "chieu_cao": None, "spo2": None,
+}
 
 
 def parse_vitals(raw_text: str) -> dict:
     """Parse vital signs from raw OCR text.
 
-    Args:
-        raw_text: Raw text extracted by OCR engine.
-
-    Returns:
-        Dictionary with extracted vital sign values.
-        Missing fields are set to None.
+    Tries parsers in order of reliability; returns first successful result
+    with at least one non-null field.
     """
-    logger.info("Parsing vital signs from OCR text")
-    logger.debug("Raw text:\n%s", raw_text)
+    # 1. JSON (Qwen3-VL primary output)
+    result = _parse_json(raw_text)
+    if result and _count_found(result) >= 1:
+        logger.info("JSON parser: %d field(s) found", _count_found(result))
+        return result
 
-    # Try Qwen3-VL markdown table format first
-    qwen_vitals = parse_qwen_markdown(raw_text)
-    if qwen_vitals is not None:
-        non_null = sum(1 for k, v in qwen_vitals.items()
-                       if k != "_units" and v is not None)
-        if non_null >= 1:
-            logger.info("Qwen markdown parser matched %d field(s)", non_null)
-            return qwen_vitals
+    # 2. Simple "Label: value" lines
+    result = _parse_label_value(raw_text)
+    if result and _count_found(result) >= 1:
+        logger.info("Label:value parser: %d field(s) found", _count_found(result))
+        return result
 
-    # Normalize text for matching
-    normalized = _normalize_text(raw_text)
-
-    # Try LCD label parsing first (for BP monitor images)
-    lcd_vitals = _parse_lcd_labels(normalized)
-
-    # Then try Vietnamese keyword parsing
-    keyword_vitals = {
-        "mach": _extract_integer(normalized, "mach"),
-        "nhiet_do": _extract_float(normalized, "nhiet_do"),
-        "huyet_ap": _extract_blood_pressure(normalized),
-        "nhip_tho": _extract_integer(normalized, "nhip_tho"),
-        "can_nang": _extract_float(normalized, "can_nang"),
-        "chieu_cao": _extract_integer(normalized, "chieu_cao"),
-        "spo2": _extract_integer(normalized, "spo2"),
+    # 3. LCD (SYS/DIA/PUL) + Vietnamese keyword regex
+    norm = raw_text.lower().strip()
+    lcd = _parse_lcd(norm)
+    kw = {
+        "mach":     _extract_int(norm, "mach"),
+        "nhiet_do": _extract_float(norm, "nhiet_do"),
+        "huyet_ap": _extract_bp(norm),
+        "nhip_tho": _extract_int(norm, "nhip_tho"),
+        "can_nang": _extract_float(norm, "can_nang"),
+        "chieu_cao": _extract_int(norm, "chieu_cao"),
+        "spo2":     _extract_int(norm, "spo2"),
     }
-
-    # Merge: LCD results take priority where available
-    vitals = _merge_vitals(keyword_vitals, lcd_vitals)
-
-    logger.info("Parsed vitals: %s", vitals)
-    return vitals
+    result = _merge(kw, lcd)
+    logger.info("Regex parser: %d field(s) found", _count_found(result))
+    return result
 
 
-# === Qwen3-VL Markdown Parser ===
+# ─────────────────────────────────────────────
+# 1. JSON parser
+# ─────────────────────────────────────────────
 
-# Fuzzy label -> field mapping (diacritics stripped, lowercase)
-_LABEL_MAP = {
-    "mach": "mach",
-    "mạch": "mach",
-    "pulse": "mach",
-    "hr": "mach",
-    "heart rate": "mach",
-    "nhiet do": "nhiet_do",
-    "nhiệt độ": "nhiet_do",
-    "nhiet độ": "nhiet_do",
-    "nhiệt do": "nhiet_do",
-    "temp": "nhiet_do",
-    "temperature": "nhiet_do",
-    "huyet ap": "huyet_ap",
-    "huyết áp": "huyet_ap",
-    "huyet áp": "huyet_ap",
-    "huyết ap": "huyet_ap",
-    "huyệt áp": "huyet_ap",
-    "blood pressure": "huyet_ap",
-    "bp": "huyet_ap",
-    "ha": "huyet_ap",
-    "nhip tho": "nhip_tho",
-    "nhịp thở": "nhip_tho",
-    "nhip thở": "nhip_tho",
-    "nhịp tho": "nhip_tho",
-    "nup tho": "nhip_tho",
-    "nạp thở": "nhip_tho",
-    "nap tho": "nhip_tho",
-    "respiratory rate": "nhip_tho",
-    "rr": "nhip_tho",
-    "can nang": "can_nang",
-    "cân nặng": "can_nang",
-    "can ngang": "can_nang",
-    "cân nang": "can_nang",
-    "can nặng": "can_nang",
-    "weight": "can_nang",
-    "chieu cao": "chieu_cao",
-    "chiều cao": "chieu_cao",
-    "chieu cao": "chieu_cao",
-    "chiều cao": "chieu_cao",
-    "height": "chieu_cao",
-    "spo2": "spo2",
-    "sp02": "spo2",
-    "spо2": "spo2",
-    "o2": "spo2",
-}
+def _parse_json(text: str) -> dict | None:
+    """Extract JSON from model output and map to vitals dict."""
+    # Strip markdown code fences: ```json ... ``` or ``` ... ```
+    text = re.sub(r"```(?:json)?\s*", "", text).strip()
 
-
-def parse_qwen_markdown(text: str) -> dict:
-    """Parse Qwen3-VL markdown table output.
-
-    Supports multiple formats:
-      1. Pipe-delimited markdown table (| N | label | value | ... |)
-      2. Cot A / Cot B numbered list structure
-      3. Sequential blocks: labels listed first, then values in same order
-
-    Args:
-        text: Raw text from Qwen3-VL model.
-
-    Returns:
-        Vitals dict if structure detected, None otherwise.
-    """
-    # Try pipe-delimited markdown table first
-    pipe_result = _parse_pipe_table(text)
-    if pipe_result is not None:
-        non_null = sum(1 for k, v in pipe_result.items()
-                       if k != "_units" and v is not None)
-        if non_null >= 1:
-            logger.debug("Pipe table parser matched %d field(s)", non_null)
-            return pipe_result
-
-    # Try Cot A / Cot B numbered list
-    if re.search(r"[Cc][oôộ]t\s*[AB]", text, re.IGNORECASE):
-        logger.debug("Qwen markdown structure detected")
-
-        col_a_rows = _extract_column_rows(text, "A")
-        col_b_rows = _extract_column_rows(text, "B")
-
-        if col_a_rows and col_b_rows:
-            logger.debug("Cot A rows: %s", col_a_rows)
-            logger.debug("Cot B rows: %s", col_b_rows)
-
-            vitals = {
-                "mach": None,
-                "nhiet_do": None,
-                "huyet_ap": None,
-                "nhip_tho": None,
-                "can_nang": None,
-                "chieu_cao": None,
-                "spo2": None,
-            }
-
-            for row_num, label in col_a_rows.items():
-                value_str = col_b_rows.get(row_num)
-                if value_str is None:
-                    continue
-
-                field = _fuzzy_map_label(label)
-                if field is None:
-                    logger.debug("Unmapped label: '%s' (row %d)", label, row_num)
-                    continue
-
-                parsed_value = _parse_field_value(field, value_str)
-                if parsed_value is not None:
-                    vitals[field] = parsed_value
-                    logger.debug("Qwen markdown: %s = %s (from '%s')", field, parsed_value, value_str)
-
-            non_null = sum(1 for k, v in vitals.items()
-                           if k != "_units" and v is not None)
-            if non_null >= 1:
-                return vitals
-
-    # Try sequential block parsing (labels block then values block)
-    seq_result = _parse_sequential_blocks(text)
-    if seq_result is not None:
-        non_null = sum(1 for k, v in seq_result.items()
-                       if k != "_units" and v is not None)
-        if non_null >= 1:
-            logger.debug("Sequential block parser matched %d field(s)", non_null)
-            return seq_result
-
-    # Try simple "Label: value" line-by-line format (Qwen3-VL universal output)
-    simple_result = _parse_simple_label_value(text)
-    if simple_result is not None:
-        non_null = sum(1 for k, v in simple_result.items()
-                       if k != "_units" and v is not None)
-        if non_null >= 1:
-            logger.debug("Simple label:value parser matched %d field(s)", non_null)
-            return simple_result
-
-    return None
-
-
-def _parse_sequential_blocks(text: str) -> dict:
-    """Parse text where labels appear in sequence, followed by values in same order.
-
-    Handles format like:
-      Mach
-      Nhiet do
-      Huyet ap
-      ...
-      100
-      37
-      110/65
-      ...
-
-    Args:
-        text: Raw text from model.
-
-    Returns:
-        Vitals dict if sequential pattern detected, None otherwise.
-    """
-    lines = [l.strip() for l in text.split('\n') if l.strip()]
-
-    # Find lines that match known vital sign labels
-    label_indices = []
-    for i, line in enumerate(lines):
-        field = _fuzzy_map_label(line)
-        if field is not None:
-            label_indices.append((i, line, field))
-
-    # Need at least 3 consecutive-ish labels to consider this a valid block
-    if len(label_indices) < 3:
+    # Find the first { ... } block
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end <= start:
+        return None
+    try:
+        data = json.loads(text[start:end + 1])
+    except json.JSONDecodeError:
         return None
 
-    # Check if labels are roughly consecutive (within a small gap)
-    first_label_idx = label_indices[0][0]
-    last_label_idx = label_indices[-1][0]
-    label_span = last_label_idx - first_label_idx + 1
+    vitals = dict(_EMPTY_VITALS)
 
-    # Labels should be within a reasonable span (allow some gaps for noise)
-    if label_span > len(label_indices) * 3:
-        return None
-
-    # Look for value block after the labels
-    # Values should start after the last label
-    value_start = last_label_idx + 1
-
-    # Collect values: lines that look like numbers or BP patterns
-    value_lines = []
-    for i in range(value_start, len(lines)):
-        line = lines[i]
-        # Skip single letters, headers, noise
-        if re.match(r'^[a-zA-Z]{1,3}$', line) and not re.match(r'^\d', line):
-            continue
-        if re.match(r'^\d+([.,/]\d+)?$', line):
-            value_lines.append(line)
-        elif re.search(r'\d+/\d+', line):
-            value_lines.append(line)
-
-    if len(value_lines) < 3:
-        return None
-
-    # Match labels to values by position
-    vitals = {
-        "mach": None,
-        "nhiet_do": None,
-        "huyet_ap": None,
-        "nhip_tho": None,
-        "can_nang": None,
-        "chieu_cao": None,
-        "spo2": None,
-    }
-
-    found_any = False
-    for idx, (_, label, field) in enumerate(label_indices):
-        if idx >= len(value_lines):
-            break
-        value_str = value_lines[idx]
-        parsed_value = _parse_field_value(field, value_str)
-        if parsed_value is not None:
-            vitals[field] = parsed_value
-            found_any = True
-            logger.debug("Sequential: %s = %s (from '%s')", field, parsed_value, value_str)
-
-    return vitals if found_any else None
-
-
-def _parse_simple_label_value(text: str) -> dict:
-    """Parse simple 'Label: value' line-by-line format.
-
-    Handles the Qwen3-VL universal prompt output like:
-        Mạch: 100
-        Nhiệt độ: 37
-        Huyết áp: 110/65
-        Nhịp thở: 50
-        Cân nặng: 55
-        Chiều cao: 160
-        SpO2: 40
-
-    Also handles variations with extra text, units, or 'null' values.
-
-    Args:
-        text: Raw text from model.
-
-    Returns:
-        Vitals dict if label:value lines detected, None otherwise.
-    """
-    lines = [l.strip() for l in text.split('\n') if l.strip()]
-
-    vitals = {
-        "mach": None,
-        "nhiet_do": None,
-        "huyet_ap": None,
-        "nhip_tho": None,
-        "can_nang": None,
-        "chieu_cao": None,
-        "spo2": None,
-    }
-
-    found_any = False
-    for line in lines:
-        # Match pattern: "Label: value" or "Label : value"
-        match = re.match(r'^(.+?)\s*[:：]\s*(.+)$', line)
-        if not match:
-            continue
-
-        label = match.group(1).strip().rstrip('-*•')
-        value_str = match.group(2).strip()
-
-        # Skip null/none/N/A values
-        if value_str.lower() in ('null', 'none', 'n/a', '-', 'không có', 'không rõ'):
-            continue
-
-        field = _fuzzy_map_label(label)
-        if field is None:
-            continue
-
-        parsed_value = _parse_field_value(field, value_str)
-        if parsed_value is not None:
-            vitals[field] = parsed_value
-            found_any = True
-            logger.debug("Simple label:value: %s = %s (from '%s')", field, parsed_value, value_str)
-
-    return vitals if found_any else None
-
-
-def _parse_pipe_table(text: str) -> dict:
-    """Parse pipe-delimited markdown table format.
-
-    Handles formats like:
-      |  | A       | B      | C  |
-      |---|---------|--------|----|
-      | 1 | Mach    | 100    |    |
-
-    And also without leading/trailing pipes:
-      A | B | C
-      1 | Mach | 100
-
-    Args:
-        text: Raw text from model.
-
-    Returns:
-        Vitals dict if pipe table detected, None otherwise.
-    """
-    # Find lines containing pipe characters (at least 2 pipes = 3 columns)
-    lines = text.split('\n')
-    pipe_rows = []
-    for line in lines:
-        stripped = line.strip()
-        if stripped.count('|') >= 2:
-            pipe_rows.append(stripped)
-
-    if len(pipe_rows) < 3:
-        return None
-
-    # Parse each row into cells
-    data_rows = []
-    for row in pipe_rows:
-        # Strip leading/trailing pipes
-        row = row.strip('|')
-        cells = [c.strip() for c in row.split('|')]
-        # Skip separator rows (|---|---|---|)
-        if all(re.match(r'^-+$', c) or c == '' for c in cells):
-            continue
-        data_rows.append(cells)
-
-    if len(data_rows) < 2:
-        return None
-
-    # Detect column layout: find which columns contain labels and values
-    header = data_rows[0]
-    col_a_idx = None
-    col_b_idx = None
-
-    # Try to find columns by header names
-    for i, cell in enumerate(header):
-        cell_lower = cell.lower().strip()
-        if cell_lower == 'a':
-            col_a_idx = i
-        elif cell_lower == 'b':
-            col_b_idx = i
-
-    # If header has A and B, check if data rows have a leading row-number column
-    # that shifts the actual data by one position
-    if col_a_idx is not None and col_b_idx is not None:
-        # Check first data row: if cell at col_a_idx is a pure number,
-        # the table has a leading index column not in the header
-        if len(data_rows) > 1:
-            first_data = data_rows[1]
-            if (col_a_idx < len(first_data) and
-                    re.match(r'^\d+$', first_data[col_a_idx].strip())):
-                # Row numbers occupy col_a_idx, actual labels shifted right
-                col_a_idx += 1
-                col_b_idx += 1
-
-    # If no header detected, assume col 1 = label, col 2 = value
-    if col_a_idx is None or col_b_idx is None:
-        for row in data_rows[1:]:
-            non_empty = [(i, c) for i, c in enumerate(row) if c and not re.match(r'^\d+$', c)]
-            if len(non_empty) >= 2:
-                col_a_idx = non_empty[0][0]
-                col_b_idx = non_empty[1][0]
-                break
-        if col_a_idx is None:
+    def _int(key):
+        v = data.get(key)
+        if v is None or str(v).lower() in ("null", "none", ""):
+            return None
+        try:
+            return int(float(v))
+        except (TypeError, ValueError):
             return None
 
-    # Extract label-value pairs from data rows (skip header)
-    vitals = {
-        "mach": None,
-        "nhiet_do": None,
-        "huyet_ap": None,
-        "nhip_tho": None,
-        "can_nang": None,
-        "chieu_cao": None,
-        "spo2": None,
-    }
-
-    found_any = False
-    for row in data_rows[1:]:
-        if col_a_idx >= len(row) or col_b_idx >= len(row):
-            continue
-        label = row[col_a_idx].strip()
-        value_str = row[col_b_idx].strip()
-
-        if not label or not value_str:
-            continue
-
-        field = _fuzzy_map_label(label)
-        if field is None:
-            continue
-
-        parsed_value = _parse_field_value(field, value_str)
-        if parsed_value is not None:
-            vitals[field] = parsed_value
-            found_any = True
-            logger.debug("Pipe table: %s = %s (from '%s')", field, parsed_value, value_str)
-
-    return vitals if found_any else None
-
-
-def _extract_column_rows(text: str, column: str) -> dict:
-    """Extract row data from a specific column (A or B).
-
-    Handles patterns like:
-      - (row 1): "value"
-      - 1. value
-      - 1: value
-
-    Args:
-        text: Full markdown text.
-        column: "A" or "B".
-
-    Returns:
-        Dict mapping row_num (int) to value (str).
-    """
-    rows = {}
-
-    # Find the section for this column
-    # Match "Cột A", "Cot A", "cột A", etc.
-    col_pattern = re.compile(
-        r"[Cc][oôộ]t\s*" + re.escape(column) + r"[^:\n]*:?\s*\n(.*?)(?=[Cc][oôộ]t\s*[A-Z]|\Z)",
-        re.DOTALL | re.IGNORECASE,
-    )
-    col_match = col_pattern.search(text)
-    if not col_match:
-        return rows
-
-    section = col_match.group(1)
-
-    # Strategy 1: (row N): "value" format
-    for match in re.finditer(
-        r'\(row\s*(\d+)\)\s*:\s*["""\']+(.*?)["""\']+',
-        section, re.IGNORECASE,
-    ):
-        row_num = int(match.group(1))
-        value = match.group(2).strip()
-        if value:
-            rows[row_num] = value
-
-    # Strategy 2: numbered list "N. value" or "N: value" or "- (row N): value"
-    if not rows:
-        for match in re.finditer(
-            r'(?:^|\n)\s*(?:-\s*)?(\d+)[.):\s]+\s*(.+)',
-            section,
-        ):
-            row_num = int(match.group(1))
-            value = match.group(2).strip().strip('"""\'')
-            if value:
-                rows[row_num] = value
-
-    # Strategy 3: unquoted (row N): value
-    if not rows:
-        for match in re.finditer(r'\(row\s*(\d+)\)\s*:\s*(.+)', section, re.IGNORECASE):
-            row_num = int(match.group(1))
-            value = match.group(2).strip().strip('"""\'')
-            if value:
-                rows[row_num] = value
-
-    return rows
-
-
-def _fuzzy_map_label(label: str) -> str:
-    """Map a label string to a vitals field using fuzzy matching.
-
-    Tries exact match, then diacritics-stripped match.
-
-    Args:
-        label: Label text from OCR (e.g. "Mạch", "Nhiet độ").
-
-    Returns:
-        Field name (e.g. "mach", "nhiet_do") or None.
-    """
-    label_lower = label.lower().strip()
-
-    # Exact match
-    if label_lower in _LABEL_MAP:
-        return _LABEL_MAP[label_lower]
-
-    # Strip diacritics and try again
-    label_no_diac = _remove_diacritics(label_lower)
-    if label_no_diac in _LABEL_MAP:
-        return _LABEL_MAP[label_no_diac]
-
-    # Try matching against diacritic-stripped keys
-    for key, field in _LABEL_MAP.items():
-        key_no_diac = _remove_diacritics(key)
-        if label_no_diac == key_no_diac:
-            return field
-
-    # Substring match for common OCR errors
-    for key, field in _LABEL_MAP.items():
-        key_no_diac = _remove_diacritics(key)
-        if len(key_no_diac) >= 4 and key_no_diac in label_no_diac:
-            return field
-
-    return None
-
-
-def _parse_field_value(field: str, value_str: str):
-    """Parse a value string into the appropriate type for a field.
-
-    Args:
-        field: Vitals field name.
-        value_str: Raw value string from OCR.
-
-    Returns:
-        Parsed value (int, float, or dict for huyet_ap), or None.
-    """
-    value_str = value_str.strip()
-
-    if field == "huyet_ap":
-        # Parse "110/65" or "110 / 65"
-        match = re.search(r"(\d{2,3})\s*[/\\-]\s*(\d{2,3})", value_str)
-        if match:
-            return {"tam_thu": int(match.group(1)), "tam_truong": int(match.group(2))}
-        return None
-
-    elif field == "nhiet_do":
-        # Parse float like "37", "37.5", "36,8"
-        match = re.search(r"(\d+[.,]?\d*)", value_str)
-        if match:
-            try:
-                return float(match.group(1).replace(",", "."))
-            except ValueError:
-                return None
-        return None
-
-    elif field == "can_nang":
-        # Parse float like "55", "55.5", "62,3"
-        match = re.search(r"(\d+[.,]?\d*)", value_str)
-        if match:
-            try:
-                return float(match.group(1).replace(",", "."))
-            except ValueError:
-                return None
-        return None
-
-    else:
-        # Integer fields: mach, nhip_tho, chieu_cao, spo2
-        match = re.search(r"(\d+)", value_str)
-        if match:
-            try:
-                return int(match.group(1))
-            except ValueError:
-                return None
-        return None
-
-
-def _parse_lcd_labels(text: str) -> dict:
-    """Parse LCD blood pressure monitor labels (SYS, DIA, PUL).
-
-    Uses two strategies:
-    1. Same-line pattern: "SYS 128", "DIA 78", "PUL 72"
-    2. Line-by-line sequential: label on one line, value on next line
-
-    Args:
-        text: Normalized OCR text.
-
-    Returns:
-        Partial vitals dict with values found via LCD labels.
-    """
-    result = {
-        "mach": None,
-        "huyet_ap": None,
-    }
-
-    tam_thu = None
-    tam_truong = None
-    units = []
-
-    # Strategy 1: Same-line pattern matching
-    # "SYS 128", "SYS:128", "SYS.128"
-    for label, field in LCD_LABELS.items():
-        pattern = re.escape(label) + r"[\s.:;=]*(\d{2,3})"
-        match = re.search(pattern, text)
-        if match:
-            value = int(match.group(1))
-            if field == "huyet_ap.tam_thu":
-                tam_thu = value
-                logger.debug("LCD same-line: SYS = %d", value)
-            elif field == "huyet_ap.tam_truong":
-                tam_truong = value
-                logger.debug("LCD same-line: DIA = %d", value)
-            elif field == "mach":
-                result["mach"] = value
-                logger.debug("LCD same-line: PUL = %d", value)
-
-    # Strategy 2: Line-by-line sequential matching
-    # Label on one line, digit value on the next non-empty line
-    if tam_thu is None or tam_truong is None or result["mach"] is None:
-        line_results = _parse_lcd_lines(text)
-        if tam_thu is None and line_results.get("tam_thu") is not None:
-            tam_thu = line_results["tam_thu"]
-            logger.debug("LCD line-seq: SYS = %d", tam_thu)
-        if tam_truong is None and line_results.get("tam_truong") is not None:
-            tam_truong = line_results["tam_truong"]
-            logger.debug("LCD line-seq: DIA = %d", tam_truong)
-        if result["mach"] is None and line_results.get("mach") is not None:
-            result["mach"] = line_results["mach"]
-            logger.debug("LCD line-seq: PUL = %d", result["mach"])
-
-    # Capture unit metadata
-    for unit in UNIT_LABELS:
-        if unit in text:
-            units.append(unit)
-
-    if tam_thu is not None or tam_truong is not None:
-        result["huyet_ap"] = {"tam_thu": tam_thu, "tam_truong": tam_truong}
-
-    if units:
-        result["_units"] = units
-        logger.debug("LCD units detected: %s", units)
-
-    return result
-
-
-def _parse_lcd_lines(text: str) -> dict:
-    """Parse LCD values using line-by-line sequential matching.
-
-    When OCR returns labels and values on separate lines, associate them
-    by proximity: the number on the next line after a label belongs to it.
-
-    Args:
-        text: Normalized OCR text.
-
-    Returns:
-        Dict with tam_thu, tam_truong, mach values (or None).
-    """
-    lines = text.split("\n")
-    result = {"tam_thu": None, "tam_truong": None, "mach": None}
-
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
-
-        # Check if this line contains a label
-        label_field = _identify_lcd_label(line)
-
-        if label_field is not None:
-            # Look for digit value: first check same line after label
-            # Then check subsequent lines
-            value = _extract_digit_from_line(line, label_field)
-
-            if value is None:
-                # Search next non-empty lines for a digit
-                for j in range(i + 1, min(i + 3, len(lines))):
-                    next_line = lines[j].strip()
-                    if not next_line:
-                        continue
-                    # Skip lines that are model numbers (e.g. D2-65A)
-                    if re.match(r"^[A-Za-z]\d+[-]?\w*$", next_line):
-                        continue
-                    # Skip lines that are other labels
-                    if _identify_lcd_label(next_line):
-                        break
-                    # Check if next line is purely a number
-                    digit_match = re.search(r"^(\d{2,3})$", next_line)
-                    if digit_match:
-                        value = int(digit_match.group(1))
-                        break
-                    # Check if next line contains a number (possibly with units)
-                    digit_match = re.search(r"(\d{2,3})", next_line)
-                    if digit_match and not _identify_lcd_label(next_line):
-                        # Make sure it's not part of a model number
-                        if not re.search(r"[A-Za-z]\d+[-]?\w*", next_line):
-                            value = int(digit_match.group(1))
-                            break
-
-            if value is not None:
-                if label_field == "tam_thu":
-                    result["tam_thu"] = value
-                elif label_field == "tam_truong":
-                    result["tam_truong"] = value
-                elif label_field == "mach":
-                    result["mach"] = value
-
-        i += 1
-
-    return result
-
-
-def _identify_lcd_label(line: str) -> object:
-    """Identify if a line contains an LCD label.
-
-    Args:
-        line: A single line of text (already lowercase).
-
-    Returns:
-        Field name ("tam_thu", "tam_truong", "mach") or None.
-    """
-    line_clean = line.strip().lower()
-
-    # Check for SYS variants
-    if re.search(r"\bsys\b|systolic", line_clean):
-        return "tam_thu"
-
-    # Check for DIA variants
-    if re.search(r"\bdia\b|diastolic", line_clean):
-        return "tam_truong"
-
-    # Check for PUL variants
-    if re.search(r"\bpul\b|\bpulse\b|pul/min|pulse/min", line_clean):
-        return "mach"
-
-    return None
-
-
-def _extract_digit_from_line(line: str, label_field: str) -> object:
-    """Try to extract a digit value from the same line as a label.
-
-    Args:
-        line: The line containing the label.
-        label_field: Which field the label represents.
-
-    Returns:
-        Integer value or None.
-    """
-    # Remove the label text and look for remaining digits
-    cleaned = re.sub(r"(sys|dia|pul|pulse|systolic|diastolic|/min)", "", line, flags=re.IGNORECASE)
-    # Exclude model numbers like D2-65A
-    cleaned = re.sub(r"[a-zA-Z]\d+-?\d*[a-zA-Z]?", "", cleaned)
-    match = re.search(r"(\d{2,3})", cleaned)
-    if match:
-        return int(match.group(1))
-    return None
-
-
-def _merge_vitals(keyword_vitals: dict, lcd_vitals: dict) -> dict:
-    """Merge keyword-parsed vitals with LCD-parsed vitals.
-
-    LCD results take priority where they provide non-None values.
-
-    Args:
-        keyword_vitals: Results from Vietnamese keyword parsing.
-        lcd_vitals: Results from LCD label parsing.
-
-    Returns:
-        Merged vitals dictionary.
-    """
-    vitals = keyword_vitals.copy()
-
-    # LCD mach overrides keyword mach
-    if lcd_vitals.get("mach") is not None:
-        vitals["mach"] = lcd_vitals["mach"]
-
-    # LCD blood pressure overrides keyword blood pressure
-    lcd_bp = lcd_vitals.get("huyet_ap")
-    if lcd_bp is not None:
-        if vitals["huyet_ap"] is None:
-            vitals["huyet_ap"] = {}
-        if lcd_bp.get("tam_thu") is not None:
-            vitals["huyet_ap"]["tam_thu"] = lcd_bp["tam_thu"]
-        if lcd_bp.get("tam_truong") is not None:
-            vitals["huyet_ap"]["tam_truong"] = lcd_bp["tam_truong"]
-        # Clean up None sub-fields
-        if vitals["huyet_ap"].get("tam_thu") is None and vitals["huyet_ap"].get("tam_truong") is None:
-            vitals["huyet_ap"] = None
-
-    # Store unit metadata if present
-    if "_units" in lcd_vitals:
-        vitals["_units"] = lcd_vitals["_units"]
+    def _float(key):
+        v = data.get(key)
+        if v is None or str(v).lower() in ("null", "none", ""):
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    vitals["mach"] = _int("mach")
+    vitals["nhiet_do"] = _float("nhiet_do")
+    vitals["nhip_tho"] = _int("nhip_tho")
+    vitals["can_nang"] = _float("can_nang")
+    vitals["chieu_cao"] = _float("chieu_cao")
+    vitals["spo2"] = _int("spo2")
+
+    # Blood pressure: {"tam_thu": 120, "tam_truong": 80} or null
+    bp = data.get("huyet_ap")
+    if isinstance(bp, dict):
+        sys = _safe_int(bp.get("tam_thu"))
+        dia = _safe_int(bp.get("tam_truong"))
+        if sys is not None or dia is not None:
+            vitals["huyet_ap"] = {"tam_thu": sys, "tam_truong": dia}
+    elif bp is None:
+        vitals["huyet_ap"] = None
 
     return vitals
 
 
-def _normalize_text(text: str) -> str:
-    """Normalize text for keyword matching (lowercase, preserve diacritics)."""
-    return text.lower().strip()
+def _safe_int(v):
+    if v is None or str(v).lower() in ("null", "none"):
+        return None
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return None
 
 
-def _remove_diacritics(text: str) -> str:
-    """Remove Vietnamese diacritics for fuzzy matching."""
-    nfkd = unicodedata.normalize("NFKD", text)
-    return "".join(c for c in nfkd if not unicodedata.combining(c))
+# ─────────────────────────────────────────────
+# 2. Label: value parser
+# ─────────────────────────────────────────────
+
+def _parse_label_value(text: str) -> dict | None:
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    vitals = dict(_EMPTY_VITALS)
+    found = False
+    for line in lines:
+        m = re.match(r"^(.+?)\s*[:：]\s*(.+)$", line)
+        if not m:
+            continue
+        label = m.group(1).strip().rstrip("-*•")
+        value = m.group(2).strip()
+        if value.lower() in ("null", "none", "n/a", "-", "không có"):
+            continue
+        field = _fuzzy_label(label)
+        if field is None:
+            continue
+        parsed = _parse_value(field, value)
+        if parsed is not None:
+            vitals[field] = parsed
+            found = True
+    return vitals if found else None
 
 
-def _find_keyword_position(text: str, field: str) -> int:
-    """Find the position of a field keyword in the text.
+# ─────────────────────────────────────────────
+# 3. LCD + Keyword regex (legacy)
+# ─────────────────────────────────────────────
 
-    Tries exact match first, then diacritic-stripped match,
-    then fuzzy match (ignoring spaces within keywords).
+def _parse_lcd(text: str) -> dict:
+    result = {"mach": None, "huyet_ap": None}
+    sys_v = dia_v = None
+    for label, field in LCD_LABELS.items():
+        m = re.search(re.escape(label) + r"[\s.:;=]*(\d{2,3})", text)
+        if m:
+            v = int(m.group(1))
+            if field == "huyet_ap.tam_thu":
+                sys_v = v
+            elif field == "huyet_ap.tam_truong":
+                dia_v = v
+            elif field == "mach":
+                result["mach"] = v
+    # Line-by-line fallback
+    if None in (sys_v, dia_v, result["mach"]):
+        lb = _lcd_lines(text)
+        if sys_v is None:
+            sys_v = lb.get("tam_thu")
+        if dia_v is None:
+            dia_v = lb.get("tam_truong")
+        if result["mach"] is None:
+            result["mach"] = lb.get("mach")
+    if sys_v is not None or dia_v is not None:
+        result["huyet_ap"] = {"tam_thu": sys_v, "tam_truong": dia_v}
+    return result
 
-    Returns:
-        Position (end of keyword) or -1 if not found.
-    """
+
+def _lcd_lines(text: str) -> dict:
+    lines = text.split("\n")
+    out = {"tam_thu": None, "tam_truong": None, "mach": None}
+    for i, line in enumerate(lines):
+        field = _lcd_label(line)
+        if field is None:
+            continue
+        val = _digit_from_line(line)
+        if val is None:
+            for j in range(i + 1, min(i + 3, len(lines))):
+                nxt = lines[j].strip()
+                if not nxt or _lcd_label(nxt):
+                    break
+                m = re.search(r"^(\d{2,3})$", nxt) or re.search(r"(\d{2,3})", nxt)
+                if m:
+                    val = int(m.group(1))
+                    break
+        if val is not None:
+            out[field] = val
+    return out
+
+
+def _lcd_label(line: str):
+    line = line.strip().lower()
+    if re.search(r"\bsys\b|systolic", line):
+        return "tam_thu"
+    if re.search(r"\bdia\b|diastolic", line):
+        return "tam_truong"
+    if re.search(r"\bpul\b|\bpulse\b", line):
+        return "mach"
+    return None
+
+
+def _digit_from_line(line: str):
+    cleaned = re.sub(r"(sys|dia|pul|pulse|systolic|diastolic|/min)", "", line, flags=re.IGNORECASE)
+    m = re.search(r"(\d{2,3})", cleaned)
+    return int(m.group(1)) if m else None
+
+
+def _merge(kw: dict, lcd: dict) -> dict:
+    v = kw.copy()
+    if lcd.get("mach") is not None:
+        v["mach"] = lcd["mach"]
+    lcd_bp = lcd.get("huyet_ap")
+    if lcd_bp:
+        if v["huyet_ap"] is None:
+            v["huyet_ap"] = {}
+        for k in ("tam_thu", "tam_truong"):
+            if lcd_bp.get(k) is not None:
+                v["huyet_ap"][k] = lcd_bp[k]
+        if v["huyet_ap"].get("tam_thu") is None and v["huyet_ap"].get("tam_truong") is None:
+            v["huyet_ap"] = None
+    return v
+
+
+# ─────────────────────────────────────────────
+# Shared helpers
+# ─────────────────────────────────────────────
+
+def _count_found(vitals: dict) -> int:
+    return sum(1 for k, v in vitals.items() if k != "_units" and v is not None)
+
+
+def _fuzzy_label(label: str) -> str | None:
+    lo = label.lower().strip()
+    if lo in _LABEL_MAP:
+        return _LABEL_MAP[lo]
+    nd = _rm_diac(lo)
+    if nd in _LABEL_MAP:
+        return _LABEL_MAP[nd]
+    for k, f in _LABEL_MAP.items():
+        if _rm_diac(k) == nd:
+            return f
+    for k, f in _LABEL_MAP.items():
+        knd = _rm_diac(k)
+        if len(knd) >= 4 and knd in nd:
+            return f
+    return None
+
+
+def _parse_value(field: str, s: str):
+    s = s.strip()
+    if field == "huyet_ap":
+        m = re.search(r"(\d{2,3})\s*[/\\-]\s*(\d{2,3})", s)
+        if m:
+            return {"tam_thu": int(m.group(1)), "tam_truong": int(m.group(2))}
+        return None
+    if field in ("nhiet_do", "can_nang", "chieu_cao"):
+        m = re.search(r"(\d+[.,]?\d*)", s)
+        if m:
+            try:
+                return float(m.group(1).replace(",", "."))
+            except ValueError:
+                return None
+        return None
+    # integer fields
+    m = re.search(r"(\d+)", s)
+    return int(m.group(1)) if m else None
+
+
+def _rm_diac(text: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFKD", text)
+                   if not unicodedata.combining(c))
+
+
+def _kw_pos(text: str, field: str) -> int:
     keywords = FIELD_KEYWORDS.get(field, [])
-
-    for keyword in keywords:
-        # Exact match (case-insensitive)
-        pos = text.find(keyword.lower())
+    txt_nd = _rm_diac(text)
+    for kw in keywords:
+        pos = text.find(kw.lower())
         if pos != -1:
-            return pos + len(keyword)
-
-    # Try without diacritics
-    text_no_diac = _remove_diacritics(text)
-    for keyword in keywords:
-        keyword_no_diac = _remove_diacritics(keyword.lower())
-        pos = text_no_diac.find(keyword_no_diac)
+            return pos + len(kw)
+        nd = _rm_diac(kw.lower())
+        pos = txt_nd.find(nd)
         if pos != -1:
-            return pos + len(keyword_no_diac)
-
-    # Try without diacritics AND without spaces (OCR often merges words)
-    text_no_diac_no_space = text_no_diac.replace(" ", "")
-    for keyword in keywords:
-        keyword_no_diac = _remove_diacritics(keyword.lower()).replace(" ", "")
-        pos = text_no_diac_no_space.find(keyword_no_diac)
-        if pos != -1:
-            # Map back to approximate position in original text
-            return _map_position_back(text_no_diac, pos + len(keyword_no_diac))
-
+            return pos + len(nd)
     return -1
 
 
-def _map_position_back(text: str, compact_pos: int) -> int:
-    """Map a position from space-stripped text back to original text.
-
-    Args:
-        text: Original text (with spaces).
-        compact_pos: Position in space-stripped version.
-
-    Returns:
-        Approximate position in original text.
-    """
-    count = 0
-    for i, ch in enumerate(text):
-        if ch != " ":
-            count += 1
-        if count >= compact_pos:
-            return i + 1
-    return len(text)
-
-
-def _extract_nearest_number(text: str, start_pos: int, is_float: bool = False) -> object:
-    """Extract the nearest number after a given position in text.
-
-    Args:
-        text: The text to search in.
-        start_pos: Position to start searching from.
-        is_float: If True, look for decimal numbers.
-
-    Returns:
-        Extracted number (int or float) or None.
-    """
-    # Search in a window after the keyword
-    search_window = text[start_pos:start_pos + 50]
-
-    # Strip leading punctuation/separators that OCR might produce (.:, etc.)
-    search_window = re.sub(r"^[\s.:,;=]+", "", search_window)
-
-    if is_float:
-        # Match decimal numbers like 37.5, 37,5, or plain integers
-        match = re.search(r"(\d+[.,]\d+|\d+)", search_window)
-        if match:
-            value_str = match.group(1).replace(",", ".")
-            try:
-                return float(value_str)
-            except ValueError:
-                return None
-    else:
-        # Match integers
-        match = re.search(r"(\d+)", search_window)
-        if match:
-            try:
-                return int(match.group(1))
-            except ValueError:
-                return None
-
-    return None
-
-
-def _extract_integer(text: str, field: str) -> object:
-    """Extract an integer value for a given field."""
-    pos = _find_keyword_position(text, field)
-    if pos == -1:
-        logger.debug("Keyword not found for field: %s", field)
+def _nearest_num(text: str, pos: int, is_float: bool = False):
+    window = re.sub(r"^[\s.:,;=]+", "", text[pos:pos + 50])
+    pat = r"(\d+[.,]\d+|\d+)" if is_float else r"(\d+)"
+    m = re.search(pat, window)
+    if not m:
+        return None
+    try:
+        s = m.group(1).replace(",", ".")
+        return float(s) if is_float else int(s)
+    except ValueError:
         return None
 
-    value = _extract_nearest_number(text, pos, is_float=False)
-    if value is not None:
-        logger.debug("Extracted %s = %d", field, value)
-    return value
+
+def _extract_int(text: str, field: str):
+    pos = _kw_pos(text, field)
+    return _nearest_num(text, pos) if pos != -1 else None
 
 
-def _extract_float(text: str, field: str) -> object:
-    """Extract a float value for a given field."""
-    pos = _find_keyword_position(text, field)
-    if pos == -1:
-        logger.debug("Keyword not found for field: %s", field)
-        return None
-
-    value = _extract_nearest_number(text, pos, is_float=True)
-    if value is not None:
-        logger.debug("Extracted %s = %.1f", field, value)
-    return value
+def _extract_float(text: str, field: str):
+    pos = _kw_pos(text, field)
+    return _nearest_num(text, pos, is_float=True) if pos != -1 else None
 
 
-def _extract_blood_pressure(text: str) -> object:
-    """Extract blood pressure (systolic/diastolic) from text.
-
-    Looks for pattern NNN/NN or NNN/NNN near blood pressure keywords.
-    Falls back to searching the entire text for BP-like patterns.
-
-    Returns:
-        Dict with tam_thu and tam_truong, or None if not found.
-    """
-    pos = _find_keyword_position(text, "huyet_ap")
-
-    # Build search candidates: near keyword first, then full text
-    search_areas = []
-    if pos != -1:
-        search_areas.append(text[pos:pos + 50])
-    search_areas.append(text)
-
-    for search_window in search_areas:
-        # Match blood pressure pattern: 2-3 digits / 2-3 digits
-        match = re.search(r"(\d{2,3})\s*/\s*(\d{2,3})", search_window)
-        if match:
-            tam_thu = int(match.group(1))
-            tam_truong = int(match.group(2))
-            logger.debug("Extracted huyet_ap = %d/%d", tam_thu, tam_truong)
-            return {"tam_thu": tam_thu, "tam_truong": tam_truong}
-
-        # Try alternative separators (dash, backslash)
-        match = re.search(r"(\d{2,3})\s*[-\\]\s*(\d{2,3})", search_window)
-        if match:
-            tam_thu = int(match.group(1))
-            tam_truong = int(match.group(2))
-            logger.debug("Extracted huyet_ap = %d/%d (alt separator)", tam_thu, tam_truong)
-            return {"tam_thu": tam_thu, "tam_truong": tam_truong}
-
-    logger.debug("Blood pressure pattern not found")
+def _extract_bp(text: str):
+    pos = _kw_pos(text, "huyet_ap")
+    areas = ([text[pos:pos + 50]] if pos != -1 else []) + [text]
+    for area in areas:
+        m = re.search(r"(\d{2,3})\s*/\s*(\d{2,3})", area)
+        if m:
+            return {"tam_thu": int(m.group(1)), "tam_truong": int(m.group(2))}
+        m = re.search(r"(\d{2,3})\s*[-\\]\s*(\d{2,3})", area)
+        if m:
+            return {"tam_thu": int(m.group(1)), "tam_truong": int(m.group(2))}
     return None

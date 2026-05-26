@@ -1,285 +1,254 @@
-"""OCR engine using Qwen3-VL:4b via Ollama for all image types.
+"""OCR engine using qwen2.5vl:7b via Ollama.
 
-Unified pipeline:
-  1. Single Qwen3-VL:4b call with universal prompt (handles both LCD and handwritten)
-  2. Fallback: VietOCR if Ollama is completely unavailable
-
-No more LCD/handwritten branching or detect_image_mode().
+Optimizations:
+- Image resized to max 1024px before base64 (biggest speed win for Ollama)
+- num_predict=300 + temperature=0 → deterministic + fast
+- <think> tokens stripped from Qwen3 output
+- JSON output format → parser is trivial, no regex fragility
+- Async-compatible: _qwen3_vl_extract_async for use with httpx in web_app
+- VietOCR fallback unchanged
 """
 
+import base64
 import logging
-import os
 import re
 
 import cv2
 import numpy as np
-import torch
-from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-# Ollama configuration
 OLLAMA_ENDPOINT = "http://localhost:11434/api/chat"
-OLLAMA_MODEL = "qwen3-vl:4b"
-
-_vietocr_predictor = None
-
-
-def load_vietocr(device: str = "cuda:0"):
-    """Load VietOCR vgg_transformer model.
-
-    Args:
-        device: Target device (e.g. "cuda:0", "cuda:1", "cpu").
-
-    Returns:
-        VietOCR Predictor instance.
-    """
-    global _vietocr_predictor
-
-    if _vietocr_predictor is not None:
-        return _vietocr_predictor
-
-    from vietocr.tool.config import Cfg
-    from vietocr.tool.predictor import Predictor
-
-    logger.info("Loading VietOCR vgg_transformer model on device: %s", device)
-
-    config = Cfg.load_config_from_name("vgg_transformer")
-    config["cnn"]["pretrained"] = True
-    config["device"] = device
-
-    try:
-        _vietocr_predictor = Predictor(config)
-        logger.info("VietOCR model loaded successfully on %s", device)
-    except (RuntimeError, torch.cuda.OutOfMemoryError) as e:
-        if "cuda" in device:
-            logger.warning(
-                "Failed to load VietOCR on %s (%s). Falling back to CPU.", device, e
-            )
-            config["device"] = "cpu"
-            _vietocr_predictor = Predictor(config)
-            logger.info("VietOCR model loaded successfully on CPU (fallback)")
-        else:
-            raise
-
-    return _vietocr_predictor
+OLLAMA_MODEL = "qwen2.5vl:7b-q4_K_M"
+MAX_IMAGE_DIM = 1024
+OLLAMA_TIMEOUT = 45
 
 
-def extract_text(image: np.ndarray, device: str = "cuda:0", mode: str = "auto",
-                  image_path: str = None) -> str:
-    """Extract vital signs text from any medical image using Qwen3-VL:4b.
+# ─────────────────────────────────────────────
+# Public API
+# ─────────────────────────────────────────────
 
-    Sends the image directly to Qwen3-VL via Ollama with a universal prompt
-    that handles both LCD displays and handwritten/printed records.
-    Falls back to VietOCR only if Ollama is completely unavailable.
-
-    Args:
-        image: Image as numpy array (grayscale or BGR).
-        device: Target device (used only for VietOCR fallback).
-        mode: Ignored — kept for API compatibility.
-        image_path: Ignored — kept for API compatibility.
-
-    Returns:
-        Extracted text string.
-    """
-    text = _extract_text_qwen3_vl_universal(image)
+def extract_text(image: np.ndarray, device: str = "cuda:0",
+                 mode: str = "auto", image_path: str = None) -> str:
+    """Priority: Ollama → VietOCR fallback."""
+    text = _qwen3_vl_extract(image)
     if text:
-        logger.info("Qwen3-VL universal extraction successful")
         return text
 
-    # Ollama unavailable — fall back to VietOCR
-    logger.warning("Qwen3-VL unavailable, falling back to VietOCR")
-    return _extract_text_vietocr(image, device)
+    logger.warning("Ollama unavailable — falling back to VietOCR")
+    return _vietocr_extract(image, device)
 
 
-def _extract_text_qwen3_vl_universal(image: np.ndarray) -> str:
-    """Extract vital signs from any medical image using one universal prompt.
+async def extract_text_async(image: np.ndarray, device: str = "cuda:0") -> str:
+    """Async version. Priority: Ollama → VietOCR."""
+    text = await _qwen3_vl_extract_async(image)
+    if text:
+        return text
 
-    Works for both:
-    - LCD blood pressure monitors (reads SYS/DIA/PUL digits)
-    - Handwritten or printed vitals records (reads all 7 vital sign fields)
+    logger.warning("Ollama unavailable — falling back to VietOCR")
+    return _vietocr_extract(image, device)
 
-    Args:
-        image: BGR or grayscale image as numpy array.
 
-    Returns:
-        Extracted text string, or empty string if Ollama is unavailable.
-    """
-    import base64
+# ─────────────────────────────────────────────
+# Image helpers
+# ─────────────────────────────────────────────
 
+def _resize_for_vlm(image: np.ndarray, max_dim: int = MAX_IMAGE_DIM) -> np.ndarray:
+    """Resize so the longest edge ≤ max_dim. Keeps aspect ratio."""
+    h, w = image.shape[:2]
+    longest = max(h, w)
+    if longest <= max_dim:
+        return image
+    scale = max_dim / longest
+    new_w, new_h = int(w * scale), int(h * scale)
+    return cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+
+def _image_to_b64(image: np.ndarray) -> str:
+    """Encode BGR/gray numpy image to base64 JPEG string."""
     if len(image.shape) == 2:
-        bgr_image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-    else:
-        bgr_image = image
-
-    success, img_encoded = cv2.imencode(".png", bgr_image)
-    if not success:
-        logger.error("Failed to encode image for Ollama")
-        return ""
-
-    img_b64 = base64.b64encode(img_encoded.tobytes()).decode()
-
-    prompt = (
-        "This is a medical vitals image. It may be a digital LCD blood pressure monitor "
-        "or a handwritten/printed Vietnamese vitals record.\n\n"
-        "Extract ALL vital sign values you can read. Look for:\n"
-        "- Mạch / Pulse / Heart Rate / PUL (lần/phút)\n"
-        "- Nhiệt độ / Temperature / TEMP (°C)\n"
-        "- Huyết áp / Blood Pressure / SYS+DIA (mmHg)\n"
-        "- Nhịp thở / Respiratory Rate / RR (lần/phút)\n"
-        "- Cân nặng / Weight (kg)\n"
-        "- Chiều cao / Height (cm)\n"
-        "- SpO2 / Oxygen Saturation (%%)\n\n"
-        "Return ONLY the values found in this exact format. "
-        "Use null for any field not visible in the image:\n"
-        "Mạch: <number or null>\n"
-        "Nhiệt độ: <number or null>\n"
-        "Huyết áp: <SYS>/<DIA> or null\n"
-        "Nhịp thở: <number or null>\n"
-        "Cân nặng: <number or null>\n"
-        "Chiều cao: <number or null>\n"
-        "SpO2: <number or null>"
-    )
-
-    return _call_ollama(img_b64, prompt)
+        image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    ok, buf = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    if not ok:
+        raise RuntimeError("Failed to encode image to JPEG")
+    return base64.b64encode(buf.tobytes()).decode()
 
 
-def _call_ollama(img_b64: str, prompt: str) -> str:
-    """Send a request to Ollama API with an image and prompt.
+# ─────────────────────────────────────────────
+# Prompt
+# ─────────────────────────────────────────────
 
-    Args:
-        img_b64: Base64-encoded image string.
-        prompt: Text prompt for the model.
+_VITAL_PROMPT = """You are a medical data entry assistant. Your job is to read EVERY label-value pair from the image exactly as written — do NOT skip any row, do NOT validate or filter values.
 
-    Returns:
-        Model response text, or empty string on failure.
-    """
+Label mapping (Vietnamese/English):
+- Mạch / PUL / HR / Pulse / Heart Rate → mach
+- Nhiệt độ / TEMP / Temperature → nhiet_do (°C, convert if °F)
+- Huyết áp / SYS+DIA / Blood Pressure / BP → huyet_ap (format: systolic/diastolic)
+- Nhịp thở / RR / Respiratory Rate → nhip_tho
+- Cân nặng / Weight → can_nang (kg)
+- Chiều cao / Height → chieu_cao (cm)
+- SpO2 / SPO2 / O2 / Oxygen Sat → spo2
+
+Rules:
+- Report the EXACT number written next to each label, even if the value seems unusual
+- For tables/spreadsheets: column A = label, column B or C = value — read each row
+- Set null ONLY if the label is completely absent from the image
+
+Return ONLY this JSON, no markdown, no explanation:
+{"mach": int|null, "nhiet_do": float|null, "huyet_ap": {"tam_thu": int|null, "tam_truong": int|null}|null, "nhip_tho": int|null, "can_nang": float|null, "chieu_cao": float|null, "spo2": int|null}"""
+
+
+# ─────────────────────────────────────────────
+# Qwen2.5-VL extraction (sync)
+# ─────────────────────────────────────────────
+
+def _qwen3_vl_extract(image: np.ndarray) -> str:
+    """Sync Ollama call. Returns raw model text or empty string on failure."""
     try:
         import requests
     except ImportError:
-        logger.warning("requests library not available for Ollama API")
         return ""
+
+    small = _resize_for_vlm(image)
+    img_b64 = _image_to_b64(small)
 
     payload = {
         "model": OLLAMA_MODEL,
-        "messages": [{
-            "role": "user",
-            "content": prompt,
-            "images": [img_b64]
-        }],
-        "stream": False
+        "messages": [{"role": "user", "content": _VITAL_PROMPT, "images": [img_b64]}],
+        "stream": False,
+        "options": {
+            "temperature": 0,
+            "num_predict": 300,
+            "num_gpu": 0,
+        },
     }
 
     try:
-        resp = requests.post(OLLAMA_ENDPOINT, json=payload, timeout=120)
+        resp = requests.post(OLLAMA_ENDPOINT, json=payload, timeout=OLLAMA_TIMEOUT)
         resp.raise_for_status()
-        content = resp.json()["message"]["content"]
-        logger.info("Qwen3-VL raw response: %s", repr(content[:200]))
-        return content
+        raw = resp.json()["message"]["content"]
+        cleaned = _strip_think(raw)
+        logger.debug("Qwen2.5-VL response: %s", cleaned[:200])
+        return cleaned
     except requests.exceptions.ConnectionError:
         logger.warning("Ollama not running at %s", OLLAMA_ENDPOINT)
         return ""
     except requests.exceptions.Timeout:
-        logger.warning("Ollama request timed out")
+        logger.warning("Ollama timed out after %ds", OLLAMA_TIMEOUT)
         return ""
     except Exception as e:
-        logger.warning("Ollama request failed: %s", e)
+        logger.warning("Ollama error: %s", e)
         return ""
 
 
-def _extract_text_vietocr(image: np.ndarray, device: str) -> str:
-    """Extract text using VietOCR (optimized for Vietnamese handwritten text).
+async def _qwen3_vl_extract_async(image: np.ndarray) -> str:
+    """Async Ollama call using httpx — does not block the event loop."""
+    try:
+        import httpx
+    except ImportError:
+        logger.warning("httpx not installed — falling back to sync call")
+        return _qwen3_vl_extract(image)
 
-    Args:
-        image: Image as numpy array.
-        device: Target device.
+    small = _resize_for_vlm(image)
+    img_b64 = _image_to_b64(small)
 
-    Returns:
-        Extracted text string.
-    """
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": [{"role": "user", "content": _VITAL_PROMPT, "images": [img_b64]}],
+        "stream": False,
+        "options": {"temperature": 0, "num_predict": 300},
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
+            resp = await client.post(OLLAMA_ENDPOINT, json=payload)
+            resp.raise_for_status()
+            raw = resp.json()["message"]["content"]
+            return _strip_think(raw)
+    except httpx.ConnectError:
+        logger.warning("Ollama not running at %s", OLLAMA_ENDPOINT)
+        return ""
+    except httpx.TimeoutException:
+        logger.warning("Ollama async timed out after %ds", OLLAMA_TIMEOUT)
+        return ""
+    except Exception as e:
+        logger.warning("Ollama async error: %s", e)
+        return ""
+
+
+def _strip_think(text: str) -> str:
+    """Remove <think>...</think> blocks that Qwen3 reasoning model emits."""
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    return text.strip()
+
+
+# ─────────────────────────────────────────────
+# VietOCR fallback
+# ─────────────────────────────────────────────
+
+def load_vietocr(device: str = "cuda:0"):
+    global _vietocr_predictor
+    if _vietocr_predictor is not None:
+        return _vietocr_predictor
+
+    import torch
+    from vietocr.tool.config import Cfg
+    from vietocr.tool.predictor import Predictor
+
+    config = Cfg.load_config_from_name("vgg_transformer")
+    config["cnn"]["pretrained"] = True
+    config["device"] = device
+    try:
+        _vietocr_predictor = Predictor(config)
+    except (RuntimeError, torch.cuda.OutOfMemoryError):
+        config["device"] = "cpu"
+        _vietocr_predictor = Predictor(config)
+    return _vietocr_predictor
+
+
+_vietocr_predictor = None
+
+
+def _vietocr_extract(image: np.ndarray, device: str) -> str:
+    from PIL import Image
     from .preprocessor import preprocess_for_handwritten
 
     predictor = load_vietocr(device)
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
+    binary = preprocess_for_handwritten(gray)
+    pil = Image.fromarray(binary).convert("RGB")
 
-    # Apply handwritten-specific thresholding
-    if len(image.shape) == 2:
-        binary = preprocess_for_handwritten(image)
-        pil_image = Image.fromarray(binary).convert("RGB")
-    else:
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        binary = preprocess_for_handwritten(gray)
-        pil_image = Image.fromarray(binary).convert("RGB")
-
-    # Detect text regions and OCR each one
-    text_lines = _extract_regions_vietocr(pil_image, predictor)
-
-    if not text_lines:
-        # Fallback: OCR the entire image as one region
-        logger.debug("No regions detected, running VietOCR on full image")
-        text = predictor.predict(pil_image)
-        return text.strip()
-
-    return "\n".join(text_lines)
+    lines = _vietocr_regions(pil, predictor)
+    if lines:
+        return "\n".join(lines)
+    return predictor.predict(pil).strip()
 
 
-def _extract_regions_vietocr(pil_image: Image.Image, predictor) -> list:
-    """Detect text regions using contour analysis and OCR each with VietOCR.
-
-    Args:
-        pil_image: PIL Image in RGB format.
-        predictor: VietOCR predictor instance.
-
-    Returns:
-        List of extracted text strings, one per detected region.
-    """
-    # Convert to grayscale for contour detection
-    img_array = np.array(pil_image.convert("L"))
-
-    # Binary threshold
-    _, binary = cv2.threshold(img_array, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-
-    # Dilate to merge nearby text into regions
+def _vietocr_regions(pil_image, predictor) -> list:
+    from PIL import Image
+    img_arr = np.array(pil_image.convert("L"))
+    _, binary = cv2.threshold(img_arr, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (30, 10))
     dilated = cv2.dilate(binary, kernel, iterations=2)
-
-    # Find contours
     contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
     if not contours:
         return []
 
-    # Filter and sort contours by position (top to bottom, left to right)
-    img_h, img_w = img_array.shape
-    min_area = img_h * img_w * 0.001  # Minimum 0.1% of image area
-
-    regions = []
-    for contour in contours:
-        x, y, w, h = cv2.boundingRect(contour)
-        area = w * h
-        if area >= min_area and w > 20 and h > 10:
-            regions.append((x, y, w, h))
-
-    # Sort top-to-bottom, then left-to-right
+    h, w = img_arr.shape
+    min_area = h * w * 0.001
+    regions = [(x, y, bw, bh) for c in contours
+               for x, y, bw, bh in [cv2.boundingRect(c)]
+               if bw * bh >= min_area and bw > 20 and bh > 10]
     regions.sort(key=lambda r: (r[1] // 50, r[0]))
 
-    text_lines = []
-    for x, y, w, h in regions:
-        # Add padding
-        pad = 5
-        x1 = max(0, x - pad)
-        y1 = max(0, y - pad)
-        x2 = min(img_w, x + w + pad)
-        y2 = min(img_h, y + h + pad)
-
-        # Crop region from original RGB image
-        region_img = pil_image.crop((x1, y1, x2, y2))
-
+    lines = []
+    for x, y, bw, bh in regions:
+        crop = pil_image.crop((max(0, x-5), max(0, y-5),
+                               min(w, x+bw+5), min(h, y+bh+5)))
         try:
-            text = predictor.predict(region_img)
-            text = text.strip()
-            if text:
-                text_lines.append(text)
-        except Exception as e:
-            logger.debug("VietOCR failed on region (%d,%d,%d,%d): %s", x, y, w, h, e)
-
-    return text_lines
+            t = predictor.predict(crop).strip()
+            if t:
+                lines.append(t)
+        except Exception:
+            pass
+    return lines

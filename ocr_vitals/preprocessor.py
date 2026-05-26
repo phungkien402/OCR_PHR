@@ -1,4 +1,9 @@
-"""Image preprocessing for OCR pipeline using OpenCV."""
+"""Image preprocessing for OCR pipeline.
+
+Two separate paths:
+- preprocess_for_vlm(): fast path for Qwen3-VL — just resize, no denoising
+- preprocess_image(): slow path for VietOCR — CLAHE + denoising for handwritten text
+"""
 
 import logging
 
@@ -8,97 +13,94 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
-def preprocess_image(image_path: str) -> np.ndarray:
-    """Preprocess an image for OCR extraction.
+def preprocess_for_vlm(image_path: str, max_dim: int = 1024) -> np.ndarray:
+    """Fast preprocessing for vision-language models (Qwen3-VL).
 
-    Returns a grayscale, contrast-enhanced, denoised image.
-    Does NOT classify the image type — that is handled by ocr_engine.py.
+    VLMs do their own internal preprocessing — sending CLAHE/denoised grayscale
+    actually HURTS accuracy (model expects natural color images).
+    Just resize to keep inference fast; return BGR.
 
     Args:
-        image_path: Path to the input image.
+        image_path: Path to input image.
+        max_dim: Max longest edge in pixels (default 1024).
 
     Returns:
-        Preprocessed grayscale image as numpy array.
+        BGR image resized to max_dim.
     """
-    logger.info("Preprocessing image: %s", image_path)
-
     img = cv2.imread(image_path)
     if img is None:
         raise ValueError(f"Cannot read image: {image_path}")
 
-    # Convert to grayscale
+    h, w = img.shape[:2]
+    longest = max(h, w)
+    if longest > max_dim:
+        scale = max_dim / longest
+        img = cv2.resize(img, (int(w * scale), int(h * scale)),
+                         interpolation=cv2.INTER_AREA)
+        logger.debug("VLM resize: %dx%d → %dx%d", w, h, img.shape[1], img.shape[0])
+
+    return img
+
+
+def preprocess_image(image_path: str) -> np.ndarray:
+    """Full preprocessing for VietOCR (handwritten text).
+
+    Grayscale + CLAHE contrast enhancement + denoising.
+    Slow but improves VietOCR accuracy on low-contrast scanned text.
+
+    Args:
+        image_path: Path to input image.
+
+    Returns:
+        Preprocessed grayscale image.
+    """
+    logger.info("Preprocessing for VietOCR: %s", image_path)
+    img = cv2.imread(image_path)
+    if img is None:
+        raise ValueError(f"Cannot read image: {image_path}")
+
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-    # Resize if shortest dimension < 1000px (preserve aspect ratio)
+    # Upscale small images for better OCR
     h, w = gray.shape[:2]
-    min_dim = min(h, w)
-    if min_dim < 1000:
-        scale = 1000 / min_dim
-        new_w = int(w * scale)
-        new_h = int(h * scale)
-        gray = cv2.resize(gray, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
-        logger.debug("Resized image from %dx%d to %dx%d", w, h, new_w, new_h)
+    if min(h, w) < 1000:
+        scale = 1000 / min(h, w)
+        gray = cv2.resize(gray, (int(w * scale), int(h * scale)),
+                          interpolation=cv2.INTER_CUBIC)
 
-    # Apply CLAHE for contrast enhancement
+    # CLAHE contrast enhancement
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     enhanced = clahe.apply(gray)
 
-    # Denoise
-    denoised = cv2.fastNlMeansDenoising(enhanced, None, h=10, templateWindowSize=7, searchWindowSize=21)
-
-    logger.info("Preprocessing complete")
+    # Denoising (slow but helps VietOCR on noisy scans)
+    denoised = cv2.fastNlMeansDenoising(
+        enhanced, None, h=10, templateWindowSize=7, searchWindowSize=21
+    )
     return denoised
 
 
-def preprocess_for_handwritten(image: np.ndarray) -> np.ndarray:
-    """Apply adaptive thresholding for handwritten text.
-
-    Args:
-        image: Grayscale preprocessed image.
-
-    Returns:
-        Binary image optimized for handwritten OCR.
-    """
-    processed = cv2.adaptiveThreshold(
-        image, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY, 11, 2
-    )
-    return processed
-
-
-def preprocess_for_lcd(image: np.ndarray) -> np.ndarray:
-    """Apply Otsu thresholding for LCD/digital display images.
-
-    Args:
-        image: Grayscale preprocessed image.
-
-    Returns:
-        Binary image optimized for LCD digit OCR.
-    """
-    _, processed = cv2.threshold(image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    return processed
-
-
 def preprocess_image_raw(image_path: str) -> np.ndarray:
-    """Load image with minimal preprocessing (for engines that do their own).
-
-    Args:
-        image_path: Path to the input image.
-
-    Returns:
-        Image as BGR numpy array (resized if needed).
-    """
+    """Load image for VietOCR with minimal preprocessing."""
     img = cv2.imread(image_path)
     if img is None:
         raise ValueError(f"Cannot read image: {image_path}")
-
-    # Resize if too small
     h, w = img.shape[:2]
-    min_dim = min(h, w)
-    if min_dim < 800:
-        scale = 800 / min_dim
-        new_w = int(w * scale)
-        new_h = int(h * scale)
-        img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
-
+    if min(h, w) < 800:
+        scale = 800 / min(h, w)
+        img = cv2.resize(img, (int(w * scale), int(h * scale)),
+                         interpolation=cv2.INTER_CUBIC)
     return img
+
+
+def preprocess_for_handwritten(image: np.ndarray) -> np.ndarray:
+    """Adaptive threshold for handwritten text (VietOCR input)."""
+    return cv2.adaptiveThreshold(
+        image, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY, 11, 2
+    )
+
+
+def preprocess_for_lcd(image: np.ndarray) -> np.ndarray:
+    """Otsu threshold for LCD displays."""
+    _, out = cv2.threshold(image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return out
